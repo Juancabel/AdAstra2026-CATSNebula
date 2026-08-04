@@ -1,0 +1,15 @@
+# Archivos originales
+
+/data
+
+# Ambientes virtuales.
+
+/.venv
+/venv
+
+# Pycache
+__pycache__/
+.pytest_cache/
+*.pyc
+*.pyo
+*.pyd
