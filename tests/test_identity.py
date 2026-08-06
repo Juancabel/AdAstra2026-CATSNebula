@@ -119,6 +119,48 @@ def test_soft_hyphen_eliminado():
     assert compute_doc_id(limpio) == compute_doc_id(con_shy)
 
 
+def test_separadores_de_linea_unicode():
+    """
+    U+2028 y U+2029 se convierten en salto de línea normal.
+
+    ES EL BUG MÁS IMPORTANTE DE ESTE MÓDULO: json.dumps() NO los escapa,
+    así que sobreviven al JSONL y cualquier herramienta que parta el archivo
+    por líneas ve dos líneas donde solo escribimos un objeto. VS Code los
+    reporta como "unusual line terminators".
+    """
+    con_u2028 = "Primer parrafo.\u2028Segundo parrafo."
+    con_u2029 = "Primer parrafo.\u2029Segundo parrafo."
+    normal = "Primer parrafo.\nSegundo parrafo."
+
+    assert normalize_text(con_u2028) == normal
+    assert normalize_text(con_u2029) == normal
+    assert compute_doc_id(con_u2028) == compute_doc_id(normal)
+
+
+def test_jsonl_sobrevive_una_sola_linea():
+    """
+    Un documento con separadores Unicode debe ocupar EXACTAMENTE una línea
+    del JSONL tras normalizar. Es la prueba de regresión del bug real.
+    """
+    import json as _json
+
+    crudo = "Texto con\u2028separador\u2029raro y \u200b invisible."
+    doc = {"doc_id": compute_doc_id(crudo), "text": normalize_text(crudo)}
+    linea = _json.dumps(doc, ensure_ascii=False) + "\n"
+
+    assert len(linea.splitlines()) == 1, (
+        "El documento ocupa más de una línea: quedaron separadores Unicode "
+        "sin normalizar y el JSONL está roto."
+    )
+
+
+def test_marcas_direccionales_y_word_joiner():
+    """Caracteres de categoría Cf se eliminan (LRM, RLM, word joiner)."""
+    limpio = "texto normal"
+    sucio = "texto\u200e\u200f\u2060 normal"
+    assert compute_doc_id(limpio) == compute_doc_id(sucio)
+
+
 def test_espacios_redundantes():
     """Espacios y tabs repetidos no cambian el ID."""
     a = "Palabra    otra\t\tpalabra"

@@ -30,6 +30,9 @@ _EXTENSION_A_FORMATO = {
     ".png": "imagen",
     ".jpg": "imagen",
     ".jpeg": "imagen",
+    ".avif": "imagen",
+    ".webp": "imagen",
+    ".gif": "imagen",
     ".pbf": "pbf",
     ".mvt": "pbf",  # Mapbox Vector Tile, extensión alternativa común
 }

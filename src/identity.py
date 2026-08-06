@@ -4,6 +4,9 @@ identity.py — Normalización de texto e identificadores estables.
 Módulo compartido por TODO el equipo (A, B, C y D).
 Nadie debe calcular un doc_id fuera de aquí.
 
+Contrato:
+    doc_id = sha1(normalize_text(texto_extraido))[:12]
+
 Alcance:
     Este módulo cubre SOLO identidad a nivel de documento.
     El chunk_id lo define C junto con la estrategia de fragmentación.
@@ -20,35 +23,19 @@ import unicodedata
 
 # Versión de la lógica de normalización.
 # Súbela SOLO si cambias normalize_text(), y avisa al equipo: invalida los IDs.
-NORMALIZER_VERSION = "1.0.0"
+NORMALIZER_VERSION = "1.1.0"
 
 # Longitud por defecto del doc_id en caracteres hexadecimales.
 # 12 hex = 48 bits. Con ~1e5 documentos la probabilidad de colisión es ~1e-5.
 DOC_ID_LENGTH = 12
 
-# Espacios "raros" que los extractores de PDF y HTML producen constantemente.
-# \xa0 es el non-breaking space (&nbsp;), el más frecuente con diferencia.
-_ESPACIOS_UNICODE = (
-    "\u00a0"  # non-breaking space
-    "\u1680"  # ogham space mark
-    "\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a"  # espacios tipográficos
-    "\u202f"  # narrow no-break space
-    "\u205f"  # medium mathematical space
-    "\u3000"  # ideographic space
-)
-_TABLA_ESPACIOS = {ord(c): " " for c in _ESPACIOS_UNICODE}
-
-# Caracteres de ancho cero: invisibles, pero cambian el hash. Se eliminan.
-_INVISIBLES = dict.fromkeys(
-    [
-        0xFEFF,  # BOM / zero-width no-break space
-        0x200B,  # zero-width space
-        0x200C,  # zero-width non-joiner
-        0x200D,  # zero-width joiner
-        0x00AD,  # soft hyphen (muy común en PDFs justificados)
-    ],
-    None,
-)
+# Separadores de línea Unicode. CRÍTICOS: json.dumps() NO los escapa, así que
+# sobreviven al JSONL y cualquier herramienta que parta por líneas ve un objeto
+# donde solo hay una línea real. Es la causa de las "líneas blancas" en VS Code.
+_SEPARADORES_LINEA = {
+    0x2028,  # LINE SEPARATOR (categoría Zl)
+    0x2029,  # PARAGRAPH SEPARATOR (categoría Zp)
+}
 
 _RE_TRES_O_MAS_SALTOS = re.compile(r"\n{3,}")
 
@@ -63,10 +50,13 @@ def normalize_text(text: str) -> str:
     Pasos:
       1. Unicode NFC — unifica "á" precompuesta vs. "a" + tilde combinante.
          Sin esto, un PDF y un HTML con la misma palabra dan hashes distintos.
-      2. Elimina caracteres invisibles (BOM, zero-width, soft hyphen).
-      3. Convierte espacios Unicode exóticos (\\xa0 etc.) a espacio normal.
-      4. Unifica saltos de línea a \\n.
-      5. Elimina caracteres de control (salvo \\n y \\t).
+      2. Convierte U+2028/U+2029 a salto de línea normal. json.dumps() NO
+         los escapa, así que romperían el conteo de líneas del JSONL.
+      3. Elimina todo carácter de formato (categoría Cf): BOM, zero-width,
+         soft hyphen, marcas direccionales, word joiner.
+      4. Convierte cualquier separador de espacio (categoría Zs) a espacio
+         ASCII: cubre \\xa0 y todos los espacios tipográficos.
+      5. Unifica saltos de línea a \\n y elimina controles (categoría Cc).
       6. Colapsa espacios/tabs repetidos dentro de cada línea.
       7. Quita espacios al final de cada línea.
       8. Colapsa 3+ saltos de línea a exactamente 2 (separador de párrafo).
@@ -84,19 +74,29 @@ def normalize_text(text: str) -> str:
     # 1. Normalización Unicode canónica compuesta.
     text = unicodedata.normalize("NFC", text)
 
-    # 2. Fuera caracteres invisibles.
-    text = text.translate(_INVISIBLES)
-
-    # 3. Espacios Unicode exóticos -> espacio ASCII.
-    text = text.translate(_TABLA_ESPACIOS)
-
-    # 4. Saltos de línea: CRLF y CR sueltos -> LF.
+    # 2. Saltos de línea: CRLF y CR sueltos -> LF.
     text = text.replace("\r\n", "\n").replace("\r", "\n")
 
-    # 5. Caracteres de control (categoría Cc) excepto \n y \t.
-    text = "".join(
-        c for c in text if c in "\n\t" or unicodedata.category(c) != "Cc"
-    )
+    # 3-5. Una sola pasada por categoría Unicode.
+    #      Cf = formato (BOM, zero-width, soft hyphen, LRM/RLM, word joiner)
+    #      Zs = separador de espacio (\xa0 y todos los espacios tipográficos)
+    #      Zl/Zp = separadores de línea Unicode -> salto normal
+    #      Cc = control -> se eliminan salvo \n y \t
+    salida = []
+    for c in text:
+        if ord(c) in _SEPARADORES_LINEA:
+            salida.append("\n")
+            continue
+        categoria = unicodedata.category(c)
+        if categoria == "Cf":
+            continue                      # invisible: fuera
+        if categoria == "Zs":
+            salida.append(" ")            # cualquier espacio raro -> espacio
+            continue
+        if categoria == "Cc" and c not in "\n\t":
+            continue                      # control: fuera
+        salida.append(c)
+    text = "".join(salida)
 
     # 6-7. Por línea: colapsar espacios internos y quitar los del final.
     lineas = [" ".join(linea.split()) for linea in text.split("\n")]
