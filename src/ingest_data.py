@@ -27,6 +27,10 @@ from extractores_datos import (
     extraer_json,
     extraer_pbf,
     extraer_xlsx,
+    extraer_pdf,
+    extraer_html,
+    extraer_md,
+    extraer_txt,
 )
 from identity import compute_doc_id, normalize_text, text_is_usable
 from indice_oficial import cargar_indice_oficial, comparar_con_ingesta
@@ -37,7 +41,7 @@ from mapeos_json import (
 )
 
 # Formatos que le corresponden a B. Los csv los procesa A.
-FORMATOS_DE_B = {"json", "xlsx", "imagen", "pbf"}
+FORMATOS_DE_B = {"json", "xlsx", "imagen", "pbf", "pdf", "html", "md", "txt"}
 
 # Campos del índice oficial que se copian a `extra`. El resto (nombre_archivo,
 # fenomeno_indice) ya está en el documento o se infiere de la ruta.
@@ -120,6 +124,14 @@ def construir_documento(
         if not usar_ocr:
             raise ValueError("OCR desactivado con --sin-ocr")
         texto, titulo, extra = extraer_imagen(ruta)
+    elif formato == "pdf":
+        texto, titulo, extra = extraer_pdf(ruta)
+    elif formato == "html":
+        texto, titulo, extra = extraer_html(ruta)
+    elif formato == "md":
+        texto, titulo, extra = extraer_md(ruta)
+    elif formato == "txt":
+        texto, titulo, extra = extraer_txt(ruta)
     elif formato == "pbf":
         asignados = None
         if asignacion_pbf is not None:

@@ -167,6 +167,33 @@ def extraer_catalogo(datos) -> str:
     registros = datos if isinstance(datos, list) else [datos]
     lineas = []
 
+    def _collect_strings(obj):
+        """Recolecta recursivamente cadenas y valores simples de un objeto.
+
+        Devuelve una lista de strings representando los valores encontrados.
+        """
+        res = []
+        if obj is None:
+            return res
+        if isinstance(obj, str):
+            if obj.strip():
+                res.append(obj)
+            return res
+        if isinstance(obj, (int, float, bool)):
+            s = formatear_valor(obj)
+            if s:
+                res.append(s)
+            return res
+        if isinstance(obj, dict):
+            for v in obj.values():
+                res.extend(_collect_strings(v))
+            return res
+        if isinstance(obj, list):
+            for item in obj:
+                res.extend(_collect_strings(item))
+            return res
+        return res
+
     for registro in registros:
         if not isinstance(registro, dict):
             continue
@@ -175,7 +202,14 @@ def extraer_catalogo(datos) -> str:
             clave_norm = clave.lower().strip()
             if clave_norm in CAMPOS_RUIDO_CATALOGO:
                 continue
-            textos = extraer_ruta({clave: valor}, clave)
+
+            # Si el valor es un diccionario grande (p.ej. 'articulos': {url: path}),
+            # extraer sus cadenas internas en lugar de intentar evaluar la ruta.
+            if isinstance(valor, dict) or isinstance(valor, list):
+                textos = _collect_strings(valor)
+            else:
+                textos = extraer_ruta({clave: valor}, clave)
+
             if textos:
                 # aplanar_valor: un catálogo es dato de registro (una línea por
                 # registro), así que ningún valor puede traer saltos internos.
@@ -275,6 +309,100 @@ def extraer_json(ruta: Path, institucion: str) -> tuple[str, str | None, dict]:
                 extra[campo.split(".")[-1]] = valores[0]
 
     return texto, titulo, extra
+
+
+# ---------------------------------------------------------------------------
+# Texto plano / HTML / Markdown / PDF
+# ---------------------------------------------------------------------------
+
+def extraer_txt(ruta: Path) -> tuple[str, str | None, dict]:
+    """Lee un archivo de texto plano y lo devuelve como contenido.
+
+    Devuelve (texto, titulo=None, extra={}). Usa 'replace' en errores de
+    decodificación para evitar fallos por codificaciones heterogéneas.
+    """
+    contenido = ruta.read_text(encoding="utf-8", errors="replace")
+    return contenido, None, {}
+
+
+def extraer_md(ruta: Path) -> tuple[str, str | None, dict]:
+    """Extrae texto desde Markdown: limpia sintaxis básica.
+
+    Mantiene el texto visible y convierte enlaces `[a](url)` a `a`.
+    """
+    s = ruta.read_text(encoding="utf-8", errors="replace")
+    # Quitar code fences
+    s = re.sub(r"```.*?```", "", s, flags=re.S)
+    # Reemplazar enlaces [texto](url) -> texto
+    s = re.sub(r"\[([^\]]+)\]\([^\)]+\)", r"\1", s)
+    # Quitar imágenes ![alt](url) -> alt
+    s = re.sub(r"!\[([^\]]*)\]\([^\)]+\)", r"\1", s)
+    # Quitar inline code `code`
+    s = re.sub(r"`([^`]+)`", r"\1", s)
+    # Quitar encabezados markdown
+    s = re.sub(r"^#{1,6}\s*", "", s, flags=re.M)
+    return s, None, {}
+
+
+def extraer_html(ruta: Path) -> tuple[str, str | None, dict]:
+    """Extrae texto desde HTML sin depender de BeautifulSoup.
+
+    Elimina scripts/estilos y etiquetas, y desempaqueta entidades HTML.
+    No es perfecto pero suficiente como extractor de fallback.
+    """
+    from html import unescape
+
+    s = ruta.read_text(encoding="utf-8", errors="replace")
+    # Eliminar scripts y estilos
+    s = re.sub(r"(?is)<script.*?>.*?</script>", "", s)
+    s = re.sub(r"(?is)<style.*?>.*?</style>", "", s)
+    # Reemplazar etiquetas por espacio
+    s = re.sub(r"(?s)<[^>]+>", " ", s)
+    s = unescape(s)
+    s = re.sub(r"[ \t\xa0]+", " ", s)
+    s = s.strip()
+    return s, None, {}
+
+
+def extraer_pdf(ruta: Path) -> tuple[str, str | None, dict]:
+    """Extrae texto de un PDF intentando usar PyMuPDF (fitz) o PyPDF2.
+
+    Si no hay ninguna dependencia, lanza ValueError informativo para que
+    el llamador lo registre.
+    """
+    # Intentar PyMuPDF primero (mejor calidad y preserva orden)
+    try:
+        import fitz  # PyMuPDF
+
+        doc = fitz.open(ruta.as_posix())
+        partes = []
+        for pagina in doc:
+            texto = pagina.get_text("text")
+            if texto:
+                partes.append(texto)
+        doc.close()
+        return "\n\n".join(partes), None, {}
+    except Exception:
+        # Intentar PyPDF2 como alternativa
+        try:
+            from PyPDF2 import PdfReader
+
+            reader = PdfReader(ruta)
+            partes = []
+            for p in reader.pages:
+                try:
+                    t = p.extract_text() or ""
+                except Exception:
+                    t = ""
+                if t:
+                    partes.append(t)
+            return "\n\n".join(partes), None, {}
+        except Exception as e:  # noqa: BLE001
+            raise ValueError(
+                "El extractor de PDF requiere 'PyMuPDF' (fitz) o 'PyPDF2' instalado: "
+                + str(e)
+            )
+
 
 
 # ---------------------------------------------------------------------------

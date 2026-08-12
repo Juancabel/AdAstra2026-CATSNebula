@@ -1,0 +1,7 @@
+{"fuente": "F1_IA_y_Capacidades_Estrategicas/Defensa21_LatAm/defensa21_data/DEFENSA21_articulos-2.json", "tipo": "fallo", "motivo": "El texto normalizado está vacío: la extracción falló. Registra este archivo en el log de fallos en vez de indexarlo."}
+{"fuente": "F3_Dinamicas_Territoriales/Amazon_Underworld/AMAZONUW_tiles-index.json", "tipo": "fallo", "motivo": "El texto normalizado está vacío: la extracción falló. Registra este archivo en el log de fallos en vez de indexarlo."}
+{"fuente": "F3_Dinamicas_Territoriales/MAPP_OEA/mapp_catalogo.json", "tipo": "fallo", "motivo": "El texto normalizado está vacío: la extracción falló. Registra este archivo en el log de fallos en vez de indexarlo."}
+{"fuente": "F3_Dinamicas_Territoriales/MAPP_OEA/mapp_registro.json", "tipo": "fallo", "motivo": "El texto normalizado está vacío: la extracción falló. Registra este archivo en el log de fallos en vez de indexarlo."}
+{"fuente": "F3_Dinamicas_Territoriales/RESDAL/resdal_catalogo.json", "tipo": "fallo", "motivo": "El texto normalizado está vacío: la extracción falló. Registra este archivo en el log de fallos en vez de indexarlo."}
+{"fuente": "F3_Dinamicas_Territoriales/RESDAL/resdal_registro.json", "tipo": "fallo", "motivo": "El texto normalizado está vacío: la extracción falló. Registra este archivo en el log de fallos en vez de indexarlo."}
+{"fuente": "F3_Dinamicas_Territoriales/FASE ORDENADA CODEFEST.xlsx", "tipo": "excluido", "motivo": "metadata del reto, no contenido del corpus"}
