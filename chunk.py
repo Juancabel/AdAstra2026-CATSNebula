@@ -69,7 +69,7 @@ import json
 import re
 from pathlib import Path
 
-CHUNKER_VERSION = "1.1.0"
+CHUNKER_VERSION = "1.2.0"
 
 # Formatos serializados como registros: la línea es la unidad atómica.
 FORMATOS_REGISTRO = frozenset({"pbf", "xlsx", "csv"})
@@ -280,6 +280,37 @@ def subdividir_para_salida(texto: str, maximo: int = MAXIMO_PALABRAS,
     return _agrupar(piezas, sep, maximo)
 
 
+def _unir_line_wraps(texto: str) -> str:
+    """
+    Une los saltos de línea que son 'line-wrap' del PDF (una oración
+    partida por el ancho de página) y respeta los que son fin de oración,
+    título o ítem de índice.
+
+    Motivo: el extractor conserva el salto de línea visual del PDF. pysbd,
+    al ver "...51 notable\nmachine learning...", toma ese \n como fin de
+    oración y parte la oración en dos unidades; el corte sobrevive al
+    empaquetado y deja chunks que terminan a mitad de frase.
+
+    Regla determinista: se une SOLO si el carácter previo NO es terminador
+    (.!?:;…) y el carácter tras el \n es una letra minúscula (con caja).
+    islower() es Unicode: cubre latín, cirílico, griego y acentos por igual.
+    Si tras el \n hay mayúscula o dígito (título, nueva oración, ítem de TOC
+    "Patents 12"), se respeta el salto. Las escrituras sin caja (CJK, árabe)
+    nunca son islower(), así que quedan intactas (no llevan espacio).
+    """
+    texto = texto.replace("\r\n", "\n").replace("\r", "\n")
+    # guion de corte de palabra:  "develop-\nment" -> "development"
+    texto = re.sub(r"(\w)-\n(\w)", r"\1\2", texto)
+
+    def _unir(m):
+        return (f"{m.group(1)} {m.group(2)}"
+                if m.group(2).islower() else m.group(0))
+
+    # char previo no-terminador + salto + letra: se une si la letra es
+    # minúscula (wrap real); si no, se conserva el salto.
+    return re.sub(r"([^\.\!\?\:\;\u2026\n])\n(\w)", _unir, texto)
+
+
 def segmentar_documento(doc: dict, maximo: int = MAXIMO_PALABRAS) -> list[str]:
     """
     Fase 1 (cara, cacheable): parte el documento en unidades atómicas.
@@ -316,6 +347,10 @@ def segmentar_documento(doc: dict, maximo: int = MAXIMO_PALABRAS) -> list[str]:
         parrafo = parrafo.strip()
         if not parrafo:
             continue
+        # Une los line-wraps del PDF antes de pysbd (ver _unir_line_wraps):
+        # sin esto, pysbd parte oraciones en el salto de línea del ancho de
+        # página y quedan chunks cortados a mitad de frase.
+        parrafo = _unir_line_wraps(parrafo)
         for oracion in _segmentar_texto(parrafo, doc.get("lang")):
             # Rama 3: lo que pysbd cree una oración pero no lo es.
             if _palabras(oracion) > maximo:
@@ -453,7 +488,8 @@ def construir_cache(entrada: Path, cache: Path, maximo: int = MAXIMO_PALABRAS) -
             doc = json.loads(linea)
             datos[doc["doc_id"]] = segmentar_documento(doc, maximo)
             n += 1
-    cache.write_text(json.dumps(datos, ensure_ascii=False), encoding="utf-8")
+    payload = {"chunker_version": CHUNKER_VERSION, "maximo": maximo, "unidades": datos}
+    cache.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
     return {"documentos": n, "unidades": sum(len(v) for v in datos.values())}
 
 
@@ -463,7 +499,16 @@ def chunkear_jsonl(entrada: Path, salida: Path, objetivo: int = OBJETIVO_PALABRA
     """Lee documents.jsonl y escribe chunks.jsonl. Devuelve un reporte."""
     unidades_cache = {}
     if cache and cache.exists():
-        unidades_cache = json.loads(cache.read_text(encoding="utf-8"))
+        _cache_raw = json.loads(cache.read_text(encoding="utf-8"))
+        # Caché versionada. Si se generó con otra versión del chunker (p. ej.
+        # antes del fix de line-wraps), la segmentación guardada es obsoleta:
+        # se ignora en vez de re-chunkear sobre unidades viejas.
+        if _cache_raw.get("chunker_version") == CHUNKER_VERSION:
+            unidades_cache = _cache_raw.get("unidades", {})
+        else:
+            print(f"AVISO: caché de segmentación versión "
+                  f"{_cache_raw.get('chunker_version')!r} != {CHUNKER_VERSION!r}; "
+                  f"se ignora y se re-segmenta.")
 
     rep = {
         "chunker_version": CHUNKER_VERSION,
