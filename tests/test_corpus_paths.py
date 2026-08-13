@@ -11,6 +11,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 from corpus_paths import (  # noqa: E402
     infer_fenomeno,
+    FORMATOS_VALIDOS,
     infer_formato,
     looks_like_map_tile,
     looks_like_paginated_report,
@@ -56,11 +57,13 @@ def test_fenomeno_sin_prefijo_falla():
     "ruta,esperado",
     [
         ("AI_Index_Stanford/pdfs/reporte.pdf", "pdf"),
-        ("CENIA/paginas/articulo.html", "html"),
+        ("CEEEP/articulos/revista/CEEEP_issue2-9-cultura.json", "json"),
         ("RutaN_GEIAL/pdfs/Observatorio/x.PDF", "pdf"),  # extensión en mayúsculas
         ("AI_Index_Stanford/recursos/Research_Development/datasets/d.csv", "csv"),
         ("AI_Index_Stanford/recursos/Healthcare_Medicine/datasets/e.xlsx", "xlsx"),
-        ("SWF_Counterspace/swf_counterspace_2026/images/foto.png", "imagen"),
+        ("SWF_Counterspace/swf_counterspace_2026/images/foto.jpg", "jpg"),
+        ("SWF_Counterspace/swf_counterspace_2026/images/foto.avif", "avif"),
+        ("SWF_Counterspace/swf_counterspace_2026/SWF_full-text.txt", "txt"),
         ("Amazon_Underworld/tiles/5/10/8.pbf", "pbf"),
     ],
 )
@@ -68,17 +71,56 @@ def test_formato_con_rutas_reales(ruta, esperado):
     assert infer_formato(ruta) == esperado
 
 
+def test_formato_solo_del_vocabulario_del_reto():
+    """
+    ADL fijó el vocabulario: la extensión real en minúsculas. Nada de
+    etiquetas de la Tabla 1 del handbook ("Imagen", "Excel", "Otro") ni de
+    agrupaciones propias como "imagen", que juntaba jpg y avif en un valor
+    que el contrato no admite.
+    """
+    for ruta in (
+        "a/b.pdf", "a/b.json", "a/b.csv", "a/b.xlsx",
+        "a/b.jpg", "a/b.avif", "a/b.txt", "a/b.pbf",
+    ):
+        assert infer_formato(ruta) in FORMATOS_VALIDOS
+
+
+def test_txt_no_se_confunde_con_markdown():
+    """
+    `.txt` mapeaba a "md", y con eso extraer_txt() era inalcanzable y el
+    único .txt del corpus (SWF_full-text.txt) se quedaba sin ingerir.
+    """
+    assert infer_formato("SWF_Counterspace/swf_counterspace_2026/SWF_full-text.txt") == "txt"
+
+
+def test_jpg_y_avif_son_formatos_distintos():
+    """El índice oficial trae ambos bajo `Tipo: Otro`/`Imagen`; el contrato no."""
+    assert infer_formato("x/foto.jpg") == "jpg"
+    assert infer_formato("x/foto.avif") == "avif"
+
+
 def test_formato_ignora_nombre_de_carpeta():
     """
-    Un .html metido por error en una carpeta llamada "pdfs" se detecta
-    como html, no como pdf. La carpeta es una pista, no la verdad.
+    Un .json metido por error en una carpeta llamada "pdfs" se detecta
+    como json, no como pdf. La carpeta es una pista, no la verdad.
     """
-    assert infer_formato("CSIS_Aerospace/csis_pdfs/en_realidad_es.html") == "html"
+    assert infer_formato("CSIS_Aerospace/csis_pdfs/en_realidad_es.json") == "json"
 
 
 def test_formato_desconocido_falla():
     with pytest.raises(ValueError):
         infer_formato("archivo.docx")
+
+
+def test_formatos_retirados_del_corpus_fallan():
+    """
+    No hay HTML ni Markdown en el corpus real. Se quitaron del mapeo para que
+    un archivo inesperado se detecte en vez de colarse con un formato que el
+    contrato no admite.
+    """
+    for ruta in ("x/pagina.html", "x/notas.md"):
+        with pytest.raises(ValueError):
+            infer_formato(ruta)
 
 
 # ---------------------------------------------------------------------------

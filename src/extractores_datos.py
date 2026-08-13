@@ -238,6 +238,60 @@ def componer_titulo_alerta(datos: dict) -> str | None:
     return None
 
 
+def es_indice_teselas(ruta: Path) -> bool:
+    """Detecta el manifiesto de descarga de teselas (AMAZONUW_tiles-index.json)."""
+    return "tiles-index" in ruta.name.lower()
+
+
+def extraer_indice_teselas(datos) -> tuple[str, str | None, dict]:
+    """
+    Resume el manifiesto de descarga de teselas como texto de cobertura.
+
+    POR QUÉ NO SE SERIALIZA COMO CATÁLOGO
+    Sus once campos (tile, zoom, x, y, url, local_path, status, size_bytes,
+    content_type, from_cache, error) son SIN EXCEPCIÓN contabilidad del
+    scraping: están todos en CAMPOS_RUIDO_CATALOGO, y por eso el catálogo
+    genérico lo dejaba vacío. No hay un solo topónimo ni descripción.
+
+    Pero el archivo tiene DOC_ID oficial, así que no puede quedar fuera del
+    entregable. Emitir sus 262 filas de coordenadas y códigos HTTP metería en
+    el índice justo el ruido que la lista negra existe para evitar. La salida
+    intermedia es un resumen de cobertura: dice qué mapa describe y qué
+    porción se pudo descargar, que es la única información recuperable aquí.
+
+    Es el mismo recurso que dedup_pbf usa para las teselas cuyos features ya
+    se indexaron en otro nivel de zoom (CLAVE_RESUMEN).
+    """
+    registros = [r for r in (datos if isinstance(datos, list) else [datos])
+                 if isinstance(r, dict)]
+    total = len(registros)
+    con_datos = sorted(r.get("tile") for r in registros
+                       if str(r.get("status")) == "cached")
+    sin_datos = total - len(con_datos)
+    zooms = sorted({r["zoom"] for r in registros if isinstance(r.get("zoom"), int)})
+
+    lineas = [
+        "Índice de teselas del mapa vectorial de Amazon Underworld.",
+        f"teselas solicitadas: {total} | con datos: {len(con_datos)} | "
+        f"sin datos: {sin_datos}",
+    ]
+    if zooms:
+        lineas.append(
+            f"niveles de zoom cubiertos: {zooms[0]} a {zooms[-1]} "
+            f"({len(zooms)} niveles)"
+        )
+    if con_datos:
+        lineas.append("teselas con datos: " + ", ".join(con_datos))
+
+    extra = {
+        "teselas_totales": total,
+        "teselas_con_datos": len(con_datos),
+        "teselas_sin_datos": sin_datos,
+        "zooms": zooms,
+    }
+    return "\n".join(lineas), "Índice de teselas — Amazon Underworld", extra
+
+
 def extraer_json(ruta: Path, institucion: str) -> tuple[str, str | None, dict]:
     """
     Extrae texto de un archivo JSON según el mapeo de su institución.
@@ -256,6 +310,12 @@ def extraer_json(ruta: Path, institucion: str) -> tuple[str, str | None, dict]:
     """
     contenido = ruta.read_text(encoding="utf-8", errors="replace")
     datos = json.loads(contenido)
+
+    # El manifiesto de teselas va antes que el catálogo genérico: encaja en
+    # PATRONES_CATALOGO ("tiles-index") pero todos sus campos son ruido, así
+    # que el catálogo lo dejaría vacío.
+    if es_indice_teselas(ruta):
+        return extraer_indice_teselas(datos)
 
     # Los catálogos se detectan por nombre de archivo, antes que por institución.
     if es_catalogo(ruta):
@@ -364,44 +424,209 @@ def extraer_html(ruta: Path) -> tuple[str, str | None, dict]:
     return s, None, {}
 
 
-def extraer_pdf(ruta: Path) -> tuple[str, str | None, dict]:
+# --- OCR de PDF escaneados --------------------------------------------------
+#
+# DPI de rasterizacion. FIJO Y EXPLICITO a proposito: junto con la version de
+# Tesseract es lo que hace el OCR reproducible. Si se deja el valor por defecto
+# de PyMuPDF, una actualizacion de la libreria cambia la resolucion, cambia el
+# texto reconocido y rompe el criterio 9 (dos corridas -> mismo sha256).
+# Verificado a 300 DPI con Tesseract 5.5.3: 5 informes, dos procesos separados,
+# 5/5 sha256 identicos. Ver el pin en requirements.txt.
+DPI_OCR_PDF = 300
+IDIOMAS_OCR_PDF = "spa+eng"
+
+# Umbral de disparo del OCR, en CARACTERES por pagina.
+#
+# Se mide en caracteres y no en palabras porque el corpus tiene PDF en chino,
+# donde no hay espacios: por palabras, un informe chino denso puntua 27 pal/pag
+# y parece vacio. Por caracteres puntua 465.
+#
+# El valor 50 no es arbitrario, sale de la distribucion real de los 759 PDF:
+#     51 documentos entre 0.0 y 3.6 char/pag   (escaneados sin capa de texto)
+#     --- hueco de 100 char/pag, CERO documentos ---
+#     el siguiente esta en 103.2
+# Es decir, el corte vive en una banda vacia de 3.6 a 103.2, un factor de 29x.
+# Que una version distinta de PyMuPDF mueva un documento de un lado al otro
+# exigiria que su extraccion cambiara en un orden de magnitud.
+MIN_CARACTERES_PDF_POR_PAGINA = 50
+
+
+def _ocr_pdf(ruta: Path, paginas_max: int | None = None) -> str:
+    """Rasteriza cada pagina a DPI fijo y le pasa Tesseract."""
+    import io
+
+    import fitz
+    import pytesseract
+    from PIL import Image
+
+    doc = fitz.open(ruta.as_posix())
+    try:
+        partes = []
+        for i, pagina in enumerate(doc):
+            if paginas_max is not None and i >= paginas_max:
+                break
+            pix = pagina.get_pixmap(dpi=DPI_OCR_PDF)
+            imagen = Image.open(io.BytesIO(pix.tobytes("png")))
+            partes.append(pytesseract.image_to_string(imagen, lang=IDIOMAS_OCR_PDF))
+    finally:
+        doc.close()
+    return "\n\n".join(partes)
+
+
+def extraer_pdf(ruta: Path, usar_ocr: bool = True) -> tuple[str, str | None, dict]:
     """Extrae texto de un PDF intentando usar PyMuPDF (fitz) o PyPDF2.
+
+    Si el PDF no trae capa de texto (esta escaneado), cae a OCR: son 51 de los
+    759 del corpus, 45 de ellos informes de Alertas Tempranas. Sin OCR esos
+    documentos tienen DOC_ID y metadata correctos pero nada que recuperar.
 
     Si no hay ninguna dependencia, lanza ValueError informativo para que
     el llamador lo registre.
+
+    El `extra` que devuelve NO es decorativo: lleva el motor que acabó
+    extrayendo (`motor_pdf`), el número de páginas y, si hubo que recurrir a
+    PyPDF2, el error de PyMuPDF que lo provocó (`aviso_pdf`). Antes ese
+    fallback era silencioso: un PDF que PyMuPDF abría a medias caía a PyPDF2
+    sin dejar rastro, y un texto truncado es indistinguible de uno completo
+    mirando solo el JSONL. `ingest_data.py` vuelca estos avisos al log.
     """
     # Intentar PyMuPDF primero (mejor calidad y preserva orden)
+    motivo_fallback = None
     try:
         import fitz  # PyMuPDF
 
         doc = fitz.open(ruta.as_posix())
-        partes = []
-        for pagina in doc:
-            texto = pagina.get_text("text")
-            if texto:
-                partes.append(texto)
-        doc.close()
-        return "\n\n".join(partes), None, {}
-    except Exception:
-        # Intentar PyPDF2 como alternativa
         try:
-            from PyPDF2 import PdfReader
-
-            reader = PdfReader(ruta)
             partes = []
-            for p in reader.pages:
-                try:
-                    t = p.extract_text() or ""
-                except Exception:
-                    t = ""
-                if t:
-                    partes.append(t)
-            return "\n\n".join(partes), None, {}
-        except Exception as e:  # noqa: BLE001
-            raise ValueError(
-                "El extractor de PDF requiere 'PyMuPDF' (fitz) o 'PyPDF2' instalado: "
-                + str(e)
-            )
+            for pagina in doc:
+                texto = pagina.get_text("text")
+                if texto:
+                    partes.append(texto)
+            n_paginas = doc.page_count
+        finally:
+            doc.close()
+        texto = "\n\n".join(partes)
+        extra = {"motor_pdf": "pymupdf", "paginas": n_paginas}
+
+        # ¿Trae capa de texto? Si no, está escaneado y hay que rasterizar.
+        if usar_ocr and n_paginas and (
+            len(texto) / n_paginas < MIN_CARACTERES_PDF_POR_PAGINA
+        ):
+            caracteres_previos = len(texto)
+            texto_ocr = _ocr_pdf(ruta)
+            # Solo se acepta el OCR si aporta más de lo que ya había: si
+            # Tesseract devuelve menos, el original imperfecto es mejor que
+            # una página en blanco.
+            if len(texto_ocr) > caracteres_previos:
+                texto = texto_ocr
+                extra = {
+                    "motor_pdf": "ocr",
+                    "motor_pdf_previo": "pymupdf",
+                    "paginas": n_paginas,
+                    "ocr_dpi": DPI_OCR_PDF,
+                    "ocr_idiomas": IDIOMAS_OCR_PDF,
+                    "caracteres_capa_texto": caracteres_previos,
+                }
+        return texto, None, extra
+    except ImportError as e:
+        motivo_fallback = f"PyMuPDF no disponible: {e}"
+    except Exception as e:  # noqa: BLE001
+        motivo_fallback = f"PyMuPDF falló: {type(e).__name__}: {e}"
+
+    # Intentar PyPDF2 como alternativa. Se llega aquí solo si PyMuPDF falló,
+    # y el motivo viaja en `extra` para que quede en el log de fallos.
+    try:
+        from PyPDF2 import PdfReader
+
+        reader = PdfReader(ruta)
+        partes = []
+        paginas_fallidas = 0
+        for p in reader.pages:
+            try:
+                t = p.extract_text() or ""
+            except Exception:  # noqa: BLE001
+                t = ""
+                paginas_fallidas += 1
+            if t:
+                partes.append(t)
+        extra = {
+            "motor_pdf": "pypdf2",
+            "paginas": len(reader.pages),
+            "aviso_pdf": motivo_fallback,
+        }
+        if paginas_fallidas:
+            extra["paginas_fallidas"] = paginas_fallidas
+        return "\n\n".join(partes), None, extra
+    except Exception as e:  # noqa: BLE001
+        raise ValueError(
+            "El extractor de PDF requiere 'PyMuPDF' (fitz) o 'PyPDF2' instalado. "
+            f"PyMuPDF: {motivo_fallback}. PyPDF2: {type(e).__name__}: {e}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# CSV
+# ---------------------------------------------------------------------------
+
+def extraer_csv(ruta: Path) -> tuple[str, str | None, dict]:
+    """
+    Serializa un CSV como "columna: valor | columna: valor", una fila por línea.
+
+    Mismo contrato de serialización que extraer_xlsx(): son el mismo tipo de
+    dato (registros tabulares) y el chunker los trata igual — la unidad atómica
+    es la línea. Las celdas vacías se omiten en vez de emitir "columna: ",
+    que solo mete ruido en el índice.
+
+    Cada valor pasa por aplanar_valor(): una celda CSV puede contener saltos de
+    línea dentro de comillas, y sin aplanar la fila se parte en varias líneas
+    del JSONL y deja de ser un registro atómico. Es exactamente el bug que ya
+    se corrigió en xlsx y pbf.
+
+    Detecta el delimitador con csv.Sniffer (hay CSV separados por ';' en el
+    corpus) y cae a ',' si no logra decidir.
+    """
+    # utf-8-sig: varios CSV del corpus traen BOM y sin esto la primera columna
+    # de la cabecera se llama "﻿nombre" y no casa con nada.
+    texto_bruto = ruta.read_text(encoding="utf-8-sig", errors="replace")
+    if not texto_bruto.strip():
+        return "", ruta.stem, {"filas": 0}
+
+    muestra = texto_bruto[:8192]
+    try:
+        dialecto = csv.Sniffer().sniff(muestra, delimiters=",;\t|")
+        delimitador = dialecto.delimiter
+    except csv.Error:
+        delimitador = ","
+
+    lector = csv.reader(texto_bruto.splitlines(), delimiter=delimitador)
+
+    cabecera = None
+    lineas = []
+    for fila in lector:
+        if not fila or all(not str(c).strip() for c in fila):
+            continue
+
+        if cabecera is None:
+            cabecera = [formatear_valor(c).strip() for c in fila]
+            continue
+
+        partes = []
+        for col, valor in zip(cabecera, fila):
+            if not col:
+                continue
+            texto_valor = aplanar_valor(formatear_valor(valor))
+            if texto_valor:
+                partes.append(f"{col}: {texto_valor}")
+        if partes:
+            lineas.append(" | ".join(partes))
+
+    extra = {"filas": len(lineas)}
+    if cabecera:
+        extra["columnas"] = [c for c in cabecera if c]
+    if delimitador != ",":
+        extra["delimitador"] = delimitador
+
+    return "\n".join(lineas), ruta.stem, extra
 
 
 

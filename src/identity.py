@@ -2,19 +2,32 @@
 identity.py — Normalización de texto e identificadores estables.
 
 Módulo compartido por TODO el equipo (A, B, C y D).
-Nadie debe calcular un doc_id fuera de aquí.
 
-Contrato:
-    doc_id = sha1(normalize_text(texto_extraido))[:12]
+CAMBIO DE CONTRATO — el doc_id ya no se calcula aquí
+    Los organizadores confirmaron en el Q&A que el emparejamiento de documentos
+    se hace con el DOC_ID que ADL suministra en `Indice_Datos_Codefest.xlsx`
+    (ej. "F1-AIINDEX-001"). El doc_id se LEE del índice oficial, no se deriva
+    del texto: ver `indice_oficial.py`.
+
+    Consecuencia buena: la identidad dejó de depender de `normalize_text()`.
+    Cambiar la normalización ya NO invalida los doc_id del corpus, y el
+    bloqueante de doc_id duplicados (11 doc_id compartidos entre 20 documentos)
+    desaparece por construcción, porque los DOC_ID oficiales son únicos.
+
+Lo que sí sigue viviendo aquí:
+    normalize_text()      — limpieza del texto que se indexa (sin cambios)
+    compute_content_sha1()— huella del CONTENIDO, va en `extra`. Ya no es
+                            identidad, pero sigue detectando los duplicados
+                            de contenido conocidos (CEOBS x8, SWF x1, teselas).
+    text_is_usable()      — heurística de "esto aporta algo".
 
 Alcance:
-    Este módulo cubre SOLO identidad a nivel de documento.
+    Este módulo cubre SOLO texto y huella de contenido.
     El chunk_id lo define C junto con la estrategia de fragmentación.
 
-Regla crítica:
-    Si NORMALIZER_VERSION cambia, TODOS los doc_id del corpus cambian.
-    Eso obliga a reconstruir el índice FAISS y metadata.jsonl completos.
-    No modificar normalize_text() después del Día 3 sin avisar al equipo.
+Regla que sigue vigente:
+    normalize_text() alimenta el índice vectorial. Cambiarla obliga a
+    reconstruir FAISS y metadata.jsonl, aunque ya no toque los doc_id.
 """
 
 import hashlib
@@ -25,9 +38,9 @@ import unicodedata
 # Súbela SOLO si cambias normalize_text(), y avisa al equipo: invalida los IDs.
 NORMALIZER_VERSION = "1.1.0"
 
-# Longitud por defecto del doc_id en caracteres hexadecimales.
+# Longitud por defecto de content_sha1 en caracteres hexadecimales.
 # 12 hex = 48 bits. Con ~1e5 documentos la probabilidad de colisión es ~1e-5.
-DOC_ID_LENGTH = 12
+CONTENT_SHA1_LENGTH = 12
 
 # Separadores de línea Unicode. CRÍTICOS: json.dumps() NO los escapa, así que
 # sobreviven al JSONL y cualquier herramienta que parta por líneas ve un objeto
@@ -109,34 +122,35 @@ def normalize_text(text: str) -> str:
     return text.strip()
 
 
-def compute_doc_id(text: str, length: int = DOC_ID_LENGTH) -> str:
+def compute_content_sha1(text: str, length: int = CONTENT_SHA1_LENGTH) -> str | None:
     """
-    Calcula el doc_id a partir del CONTENIDO del documento.
+    Huella del CONTENIDO del documento. Va en `extra`, no es la identidad.
 
     Normaliza internamente: no hace falta (ni se debe) normalizar antes.
-    Llamarla dos veces con el mismo texto crudo da siempre el mismo ID,
+    Llamarla dos veces con el mismo texto crudo da siempre la misma huella,
     en cualquier máquina, en cualquier proceso, en cualquier orden de archivos.
+
+    Sirve para detectar documentos con contenido idéntico pero `fuente` (y por
+    tanto DOC_ID) distintos: los 8 informes repetidos de CEOBS, el duplicado de
+    SWF y las teselas PBF que comparten features.
+
+    A diferencia del antiguo compute_doc_id(), un texto vacío NO es un error:
+    ahora se emiten documentos sin texto (imágenes sin OCR legible) para
+    conservar su DOC_ID y su metadata, tal como pidieron los organizadores.
+    En ese caso no hay contenido que resumir y se devuelve None, en vez de
+    darles a todos la misma huella del string vacío.
 
     Args:
         text: texto crudo extraído del archivo.
         length: caracteres hexadecimales a conservar.
 
     Returns:
-        ID hexadecimal estable, ej. "a3f9c21b7e04".
-
-    Raises:
-        ValueError: si el texto normalizado queda vacío. Eso significa que la
-            extracción falló, y NO debe indexarse: si dejáramos pasar el texto
-            vacío, todos los documentos fallidos compartirían el mismo hash y
-            se pisarían entre sí en metadata.jsonl.
+        Huella hexadecimal estable (ej. "a3f9c21b7e04"), o None si no hay texto.
     """
     normalizado = normalize_text(text)
 
     if not normalizado:
-        raise ValueError(
-            "El texto normalizado está vacío: la extracción falló. "
-            "Registra este archivo en el log de fallos en vez de indexarlo."
-        )
+        return None
 
     digest = hashlib.sha1(normalizado.encode("utf-8")).hexdigest()
     return digest[:length]

@@ -20,7 +20,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 from identity import (  # noqa: E402
     NORMALIZER_VERSION,
-    compute_doc_id,
+    compute_content_sha1,
     normalize_text,
     text_is_usable,
 )
@@ -33,13 +33,13 @@ from identity import (  # noqa: E402
 def test_mismo_texto_mismo_id():
     """Dos llamadas con el mismo texto dan el mismo ID."""
     texto = "La congestión orbital en LEO es un riesgo creciente."
-    assert compute_doc_id(texto) == compute_doc_id(texto)
+    assert compute_content_sha1(texto) == compute_content_sha1(texto)
 
 
 def test_textos_distintos_ids_distintos():
     """Textos diferentes dan IDs diferentes."""
-    a = compute_doc_id("Primer documento sobre basura espacial.")
-    b = compute_doc_id("Segundo documento sobre basura espacial.")
+    a = compute_content_sha1("Primer documento sobre basura espacial.")
+    b = compute_content_sha1("Segundo documento sobre basura espacial.")
     assert a != b
 
 
@@ -51,13 +51,13 @@ def test_id_estable_entre_procesos():
     (PYTHONHASHSEED). hashlib.sha1 no lo está. Esta prueba lo demuestra.
     """
     texto = "Inteligencia artificial en el sector defensa."
-    esperado = compute_doc_id(texto)
+    esperado = compute_content_sha1(texto)
 
     src = str(Path(__file__).resolve().parent.parent / "src")
     codigo = (
         f"import sys; sys.path.insert(0, {src!r});"
-        f"from identity import compute_doc_id;"
-        f"print(compute_doc_id({texto!r}))"
+        f"from identity import compute_content_sha1;"
+        f"print(compute_content_sha1({texto!r}))"
     )
     resultado = subprocess.run(
         [sys.executable, "-c", codigo], capture_output=True, text=True, check=True
@@ -83,7 +83,7 @@ def test_nfc_vs_nfd_mismo_id():
     nfc = "Bogot\u00e1 es la capital."
     nfd = "Bogota\u0301 es la capital."
     assert nfc != nfd  # los strings crudos SÍ son distintos
-    assert compute_doc_id(nfc) == compute_doc_id(nfd)
+    assert compute_content_sha1(nfc) == compute_content_sha1(nfd)
 
 
 def test_saltos_de_linea_windows_y_unix():
@@ -91,14 +91,14 @@ def test_saltos_de_linea_windows_y_unix():
     unix = "Primera línea\nSegunda línea"
     windows = "Primera línea\r\nSegunda línea"
     mac_viejo = "Primera línea\rSegunda línea"
-    assert compute_doc_id(unix) == compute_doc_id(windows) == compute_doc_id(mac_viejo)
+    assert compute_content_sha1(unix) == compute_content_sha1(windows) == compute_content_sha1(mac_viejo)
 
 
 def test_bom_ignorado():
     """El BOM al principio del archivo no cambia el ID."""
     sin_bom = "Contenido del documento."
     con_bom = "\ufeffContenido del documento."
-    assert compute_doc_id(sin_bom) == compute_doc_id(con_bom)
+    assert compute_content_sha1(sin_bom) == compute_content_sha1(con_bom)
 
 
 def test_espacio_no_separable():
@@ -109,14 +109,14 @@ def test_espacio_no_separable():
     """
     normal = "Fuerza Aeroespacial Colombiana"
     nbsp = "Fuerza\u00a0Aeroespacial\u00a0Colombiana"
-    assert compute_doc_id(normal) == compute_doc_id(nbsp)
+    assert compute_content_sha1(normal) == compute_content_sha1(nbsp)
 
 
 def test_soft_hyphen_eliminado():
     """El guion suave de los PDFs justificados se elimina."""
     limpio = "internacional"
     con_shy = "inter\u00adnacional"
-    assert compute_doc_id(limpio) == compute_doc_id(con_shy)
+    assert compute_content_sha1(limpio) == compute_content_sha1(con_shy)
 
 
 def test_separadores_de_linea_unicode():
@@ -134,7 +134,7 @@ def test_separadores_de_linea_unicode():
 
     assert normalize_text(con_u2028) == normal
     assert normalize_text(con_u2029) == normal
-    assert compute_doc_id(con_u2028) == compute_doc_id(normal)
+    assert compute_content_sha1(con_u2028) == compute_content_sha1(normal)
 
 
 def test_jsonl_sobrevive_una_sola_linea():
@@ -145,7 +145,7 @@ def test_jsonl_sobrevive_una_sola_linea():
     import json as _json
 
     crudo = "Texto con\u2028separador\u2029raro y \u200b invisible."
-    doc = {"doc_id": compute_doc_id(crudo), "text": normalize_text(crudo)}
+    doc = {"doc_id": compute_content_sha1(crudo), "text": normalize_text(crudo)}
     linea = _json.dumps(doc, ensure_ascii=False) + "\n"
 
     assert len(linea.splitlines()) == 1, (
@@ -158,21 +158,21 @@ def test_marcas_direccionales_y_word_joiner():
     """Caracteres de categoría Cf se eliminan (LRM, RLM, word joiner)."""
     limpio = "texto normal"
     sucio = "texto\u200e\u200f\u2060 normal"
-    assert compute_doc_id(limpio) == compute_doc_id(sucio)
+    assert compute_content_sha1(limpio) == compute_content_sha1(sucio)
 
 
 def test_espacios_redundantes():
     """Espacios y tabs repetidos no cambian el ID."""
     a = "Palabra    otra\t\tpalabra"
     b = "Palabra otra palabra"
-    assert compute_doc_id(a) == compute_doc_id(b)
+    assert compute_content_sha1(a) == compute_content_sha1(b)
 
 
 def test_espacios_al_final_de_linea():
     """Espacios finales de línea no cambian el ID."""
     a = "Línea uno   \nLínea dos  "
     b = "Línea uno\nLínea dos"
-    assert compute_doc_id(a) == compute_doc_id(b)
+    assert compute_content_sha1(a) == compute_content_sha1(b)
 
 
 # ---------------------------------------------------------------------------
@@ -210,41 +210,44 @@ def test_salto_simple_no_se_convierte_en_espacio():
 # 4. Casos borde
 # ---------------------------------------------------------------------------
 
-def test_texto_vacio_lanza_error():
+def test_texto_vacio_da_none():
     """
-    Un documento vacío NO puede recibir ID.
+    Un documento sin texto no tiene huella de contenido, y eso ya no es error.
 
-    Si lo permitiéramos, todos los documentos con extracción fallida
-    compartirían el mismo hash y se sobrescribirían entre sí.
+    Cuando el doc_id era el hash, un texto vacío TENÍA que fallar: todos los
+    documentos con extracción fallida habrían compartido el mismo id y se
+    habrían pisado entre sí. Con el DOC_ID oficial la identidad viene del
+    inventario de ADL, así que un documento sin texto (una imagen sin texto
+    legible) se emite igual, con su metadata y sin content_sha1.
+
+    Devolver None en vez del hash del string vacío es deliberado: si no, todos
+    los vacíos compartirían huella y parecerían duplicados entre sí.
     """
-    with pytest.raises(ValueError):
-        compute_doc_id("")
+    assert compute_content_sha1("") is None
 
 
-def test_solo_espacios_lanza_error():
-    """Texto que solo tiene espacios equivale a extracción fallida."""
-    with pytest.raises(ValueError):
-        compute_doc_id("   \n\n\t  \u00a0 ")
+def test_solo_espacios_da_none():
+    """Texto que solo tiene espacios equivale a no tener contenido."""
+    assert compute_content_sha1("   \n\n\t  \u00a0 ") is None
 
 
-def test_none_lanza_error():
-    """None no revienta con AttributeError, da ValueError controlado."""
-    with pytest.raises(ValueError):
-        compute_doc_id(None)
+def test_none_da_none():
+    """None no revienta con AttributeError: normalize_text lo absorbe."""
+    assert compute_content_sha1(None) is None
 
 
-def test_longitud_del_id():
-    """El ID tiene la longitud pedida y es hexadecimal."""
-    doc_id = compute_doc_id("Cualquier texto.")
-    assert len(doc_id) == 12
-    assert all(c in "0123456789abcdef" for c in doc_id)
+def test_longitud_de_la_huella():
+    """La huella tiene la longitud pedida y es hexadecimal."""
+    sha1 = compute_content_sha1("Cualquier texto.")
+    assert len(sha1) == 12
+    assert all(c in "0123456789abcdef" for c in sha1)
 
 
 def test_longitud_personalizable():
     """Se puede pedir otra longitud; es prefijo del mismo hash."""
     texto = "Cualquier texto."
-    assert len(compute_doc_id(texto, length=16)) == 16
-    assert compute_doc_id(texto, length=16).startswith(compute_doc_id(texto, length=12))
+    assert len(compute_content_sha1(texto, length=16)) == 16
+    assert compute_content_sha1(texto, length=16).startswith(compute_content_sha1(texto, length=12))
 
 
 # ---------------------------------------------------------------------------
@@ -262,37 +265,57 @@ def test_texto_util_y_no_util():
 # 6. Vectores congelados — la prueba de regresión que más importa
 # ---------------------------------------------------------------------------
 
-TEST_VECTORES_CONGELADOS = {
-    "ascii_simple": ("Hello world.", "e44f3364019d"),
+# Estos vectores congelaban el hash de identidad. Con el DOC_ID oficial la
+# identidad ya no depende del texto, así que congelar el hash dejó de proteger
+# lo que importaba y protegía algo que ya no existe.
+#
+# Lo que SÍ sigue importando es la salida literal de normalize_text(): es el
+# texto que se indexa y se fragmenta. Por eso ahora se congela el texto en vez
+# del digest — y de paso la prueba dice qué cambió, no solo que cambió: un
+# hash distinto no te enseña dónde está la diferencia, dos strings sí.
+TEXTOS_NORMALIZADOS_CONGELADOS = {
+    "ascii_simple": ("Hello world.", "Hello world."),
     "espanol_acentos": (
         "La órbita baja terrestre está congestionada.",
-        "fff761d4912a",
+        "La órbita baja terrestre está congestionada.",
     ),
     "portugues": (
         "A segurança espacial é uma preocupação crescente.",
-        "94b8133e8a02",
+        "A segurança espacial é uma preocupação crescente.",
     ),
     "multilinea": (
         "Título del informe\n\nPrimer párrafo del documento.\n\nSegundo párrafo.",
-        "f2c0075998d4",
+        "Título del informe\n\nPrimer párrafo del documento.\n\nSegundo párrafo.",
     ),
+    # Los casos que de verdad puede romper un refactor de normalize_text.
+    "espacios_y_saltos_de_sobra": (
+        "  Línea   con    espacios  \n\n\n\n  Otro párrafo  \t \n",
+        "Línea con espacios\n\nOtro párrafo",
+    ),
+    "invisibles_y_separadores": (
+        "﻿Texto con​ invisibles y separador",
+        "Texto con invisibles\ny separador",
+    ),
+    "guion_suave_de_pdf": ("con­gestión", "congestión"),
 }
 
 
-@pytest.mark.parametrize("nombre", list(TEST_VECTORES_CONGELADOS))
-def test_vectores_congelados(nombre):
+@pytest.mark.parametrize("nombre", list(TEXTOS_NORMALIZADOS_CONGELADOS))
+def test_normalizacion_congelada(nombre):
     """
-    Si esta prueba falla, normalize_text() cambió y TODOS los doc_id del
-    corpus son ahora distintos. Hay que reconstruir el índice FAISS y
-    metadata.jsonl enteros, y subir NORMALIZER_VERSION.
+    Si esta prueba falla, normalize_text() cambió y el texto indexado es otro.
+
+    Ya NO invalida los doc_id (esos vienen del inventario de ADL), pero sí
+    obliga a reconstruir el índice FAISS y metadata.jsonl, porque cambia lo
+    que se vectoriza y las fronteras de chunk.
 
     NO actualices los valores esperados sin avisar al equipo.
     """
-    texto, esperado = TEST_VECTORES_CONGELADOS[nombre]
-    assert compute_doc_id(texto) == esperado, (
-        f"Cambió el hash de '{nombre}'. NORMALIZER_VERSION actual: "
+    texto, esperado = TEXTOS_NORMALIZADOS_CONGELADOS[nombre]
+    assert normalize_text(texto) == esperado, (
+        f"Cambió la normalización de '{nombre}'. NORMALIZER_VERSION actual: "
         f"{NORMALIZER_VERSION}. Si el cambio es intencionado, súbela y "
-        f"reconstruye todo el índice."
+        f"reconstruye el índice."
     )
 
 
@@ -318,7 +341,7 @@ def test_flujo_completo_con_archivo(tmp_path):
     )
 
     texto_crudo = md.read_text(encoding="utf-8")
-    doc_id = compute_doc_id(texto_crudo)
+    doc_id = compute_content_sha1(texto_crudo)
 
     documento = {
         "doc_id": doc_id,
@@ -344,4 +367,4 @@ def test_flujo_completo_con_archivo(tmp_path):
     assert recuperado["fuente"] == "informe_prueba.md"
 
     # Recalcular el ID desde el texto ya normalizado da lo mismo (idempotencia).
-    assert compute_doc_id(recuperado["text"]) == doc_id
+    assert compute_content_sha1(recuperado["text"]) == doc_id

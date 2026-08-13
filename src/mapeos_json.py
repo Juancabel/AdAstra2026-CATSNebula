@@ -20,9 +20,33 @@ from typing import Dict, List, Set
 # Archivos que NO son contenido del corpus
 # ---------------------------------------------------------------------------
 
+# El criterio es único y verificable: si el archivo NO figura en el inventario
+# oficial (Indice_Datos_Codefest.xlsx), no tiene DOC_ID; sin DOC_ID no es
+# evaluable, e indexarlo solo compite con los documentos que sí lo son.
+#
+# Son exactamente los 22 archivos que están en disco y no en el índice, menos
+# la basura del SO: 2 xlsx de metadata + 10 artefactos de scraping + 1 pdf.
 ARCHIVOS_EXCLUIDOS = {
+    # Metadata del reto
     "Indice_Datos_Codefest.xlsx",
     "FASE ORDENADA CODEFEST.xlsx",
+    # Las 50 preguntas de evaluación, en la raíz del corpus. Si entra al
+    # índice vectorial, el sistema recupera los propios enunciados como
+    # respuesta a las consultas.
+    "Extracto_Preguntas_50_v2.pdf",
+    # Artefactos de scraping: catálogos e índices que los observatorios
+    # generaron al descargar, no contenido del corpus. Ninguno está en el
+    # inventario oficial.
+    "ceeep_catalogo.json",
+    "ceeep_registro.json",
+    "ceobs_full_catalogo.json",
+    "ceobs_full_registro.json",
+    "mapp_catalogo.json",
+    "mapp_registro.json",
+    "resdal_catalogo.json",
+    "resdal_registro.json",
+    "sipri_full_catalogo.json",
+    "sipri_full_registro.json",
 }
 
 PREFIJO_BLOQUEO_EXCEL = "~$"

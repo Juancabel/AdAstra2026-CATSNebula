@@ -15,7 +15,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent / "src"))
 
-from identity import compute_doc_id, normalize_text
+from identity import compute_content_sha1, normalize_text
 
 
 def titulo(t):
@@ -27,8 +27,8 @@ titulo("1. Mismo contenido -> mismo ID, siempre")
 
 texto = "La órbita baja terrestre presenta congestión creciente."
 print(f"Texto : {texto}")
-print(f"ID 1  : {compute_doc_id(texto)}")
-print(f"ID 2  : {compute_doc_id(texto)}")
+print(f"ID 1  : {compute_content_sha1(texto)}")
+print(f"ID 2  : {compute_content_sha1(texto)}")
 print("-> Idénticos. El ID no depende del orden de archivos ni de la máquina.")
 
 
@@ -44,7 +44,7 @@ pares = [
 ]
 
 for nombre, a, b in pares:
-    ida, idb = compute_doc_id(a), compute_doc_id(b)
+    ida, idb = compute_content_sha1(a), compute_content_sha1(b)
     marca = "OK " if ida == idb else "MAL"
     print(f"[{marca}] {nombre:<26} bytes iguales: {a == b!s:<5} ID: {ida}")
 
@@ -60,7 +60,7 @@ for t in [
     "Segundo documento sobre basura espacial.",
     "Inteligencia artificial en defensa nacional.",
 ]:
-    print(f"{compute_doc_id(t)}  <-  {t}")
+    print(f"{compute_content_sha1(t)}  <-  {t}")
 
 
 # ---------------------------------------------------------------------------
@@ -78,7 +78,7 @@ titulo("5. Extracción fallida: falla ruidosamente, no en silencio")
 
 for descripcion, valor in [("vacío", ""), ("solo espacios", "  \n\t "), ("None", None)]:
     try:
-        compute_doc_id(valor)
+        compute_content_sha1(valor)
         print(f"[MAL] {descripcion}: no lanzó error")
     except ValueError:
         print(f"[OK ] {descripcion}: ValueError, como debe ser")
@@ -101,7 +101,7 @@ with tempfile.TemporaryDirectory() as tmp:
 
     texto_crudo = md.read_text(encoding="utf-8")
     documento = {
-        "doc_id": compute_doc_id(texto_crudo),
+        "doc_id": compute_content_sha1(texto_crudo),
         "fuente": md.name,           # verbatim, tal cual lo entrega ADL
         "formato": "md",
         "fenomeno": 2,

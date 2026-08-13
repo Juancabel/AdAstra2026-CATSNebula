@@ -17,22 +17,30 @@ _PREFIJO_A_FENOMENO = {
 # Extensión de archivo -> formato. Fuente de verdad: la extensión real,
 # NUNCA el nombre de la carpeta ("articulos", "noticias", etc. son pistas,
 # no garantías — un archivo puede estar mal ubicado).
+#
+# El vocabulario de salida lo fijó ADL: la extensión real en minúsculas. La
+# Tabla 1 del handbook ("Imagen", "Excel", "Otro") es solo ilustrativa, y la
+# columna `Tipo` del índice oficial usa esas etiquetas — no sirven como
+# `formato`. Por eso `.jpg` y `.avif` NO se colapsan en "imagen": son dos
+# valores distintos del contrato, y `Otro` del índice se reparte entre `pbf`
+# (73) y `avif` (1).
+#
+# `.txt` mapeaba a "md", lo que dejaba `extraer_txt()` inalcanzable y el único
+# .txt del corpus (SWF_full-text.txt) sin ingerir.
+FORMATOS_VALIDOS = frozenset(
+    {"json", "pdf", "pbf", "csv", "jpg", "xlsx", "avif", "txt"}
+)
+
 _EXTENSION_A_FORMATO = {
     ".pdf": "pdf",
-    ".html": "html",
-    ".htm": "html",
     ".json": "json",
     ".csv": "csv",
     ".xlsx": "xlsx",
     ".xls": "xlsx",
-    ".md": "md",
-    ".txt": "md",
-    ".png": "imagen",
-    ".jpg": "imagen",
-    ".jpeg": "imagen",
-    ".avif": "imagen",
-    ".webp": "imagen",
-    ".gif": "imagen",
+    ".txt": "txt",
+    ".jpg": "jpg",
+    ".jpeg": "jpg",
+    ".avif": "avif",
     ".pbf": "pbf",
     ".mvt": "pbf",  # Mapbox Vector Tile, extensión alternativa común
 }
@@ -85,7 +93,7 @@ def infer_formato(ruta: str) -> str:
         ruta: ruta o nombre del archivo.
 
     Returns:
-        Uno de: pdf, html, json, csv, xlsx, md, imagen, pbf.
+        Uno de FORMATOS_VALIDOS: json, pdf, pbf, csv, jpg, xlsx, avif, txt.
 
     Raises:
         ValueError: extensión no reconocida. Mejor fallar aquí que
