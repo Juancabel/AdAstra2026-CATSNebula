@@ -11,9 +11,9 @@ python -m venv .venv
 ```
 
 El OCR necesita además el binario **Tesseract** instalado en el sistema, con
-los idiomas `spa`, `eng` y `por`. Ver [scripts/README_OCR.md](scripts/README_OCR.md).
+los idiomas `spa`, `eng` y `por`. [Aquí](https://www.youtube.com/watch?v=2kWvk4C1pMo) un tutorial de como descargar e instalar Tesseract. No olvidar marcar las casillas de más idiomas.
 
-El corpus va en `corpus_original/` y no se versiona.
+El corpus va en `corpus_original/` y no se versiona. Es solo descargar el RAR provisto por el equipo organizador, descomprimirlo en el proyecto, y renombrar el directorio como  `corpus_original/`.
 
 ## Regenerar `data/documents.jsonl`
 
@@ -26,9 +26,7 @@ python src/ingest_data.py corpus_original data/documents.jsonl
 python detectar_idioma.py data/documents.jsonl data/documents.jsonl --reporte data/reporte_idioma.json
 ```
 
-Tarda unos 2,5 minutos. El primer comando falla ruidosamente si falta cualquier
-archivo del inventario oficial: la cobertura es una comprobación bloqueante, no
-un aviso.
+Tarda unos 70 minutos. Se demora debido a que hay alrededor de 75 PDFs que tienen texto no seleccionable, lo que obliga al sistema a convertir cada una de sus páginas en imagenes y luego a extraer su contenido usando Tesseract. 
 
 ## Identidad de los documentos
 
