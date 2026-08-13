@@ -8,7 +8,7 @@
 #     python src/ingest_data.py corpus_original data/documents.jsonl
 #     python detectar_idioma.py data/documents.jsonl data/documents.jsonl
 /data/documents.jsonl
-
+/data/chunks.jsonl
 # Ambientes virtuales.
 
 /.venv
