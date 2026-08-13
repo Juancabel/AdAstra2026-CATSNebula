@@ -2,6 +2,13 @@
 
 /corpus_original
 
+# Salida de la ingesta. 200 MB: por encima del limite de 100 MB por archivo de
+# GitHub. Es dato derivado y la corrida es determinista (mismo sha256 en dos
+# ejecuciones), asi que se regenera en ~2,5 min con:
+#     python src/ingest_data.py corpus_original data/documents.jsonl
+#     python detectar_idioma.py data/documents.jsonl data/documents.jsonl
+/data/documents.jsonl
+
 # Ambientes virtuales.
 
 /.venv
@@ -13,3 +20,7 @@ __pycache__/
 *.pyc
 *.pyo
 *.pyd
+
+# Logging.
+
+data/*.log

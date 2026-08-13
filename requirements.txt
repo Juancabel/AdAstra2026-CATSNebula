@@ -1,16 +1,56 @@
-# Requisitos Python recomendados para extracción de texto y OCR
-# PDF: PyMuPDF (fitz) es preferible por performance; PyPDF2/pdfminer como alternativa
-# OCR: pytesseract requiere además la instalación del binario Tesseract en el sistema
-# HTML/MD: BeautifulSoup y mistune para parsing más robusto
+# Dependencias del pipeline — CODEFEST Ad Astra 2026, equipo CATSNebula.
+#
+# Un solo entorno para todo. Antes había dos medio instalados (uno con
+# openpyxl y sin py3langid, otro al revés) y qué funcionaba dependía de con
+# qué intérprete se lanzara el script.
+#
+# Versiones FIJADAS con ==. La reproducibilidad es criterio de eliminación del
+# reto: dos corridas del pipeline tienen que dar el mismo documents.jsonl byte
+# a byte, y un cambio de versión en un extractor cambia el texto extraído.
+#
+# Instalación:
+#     python -m venv .venv
+#     .venv/Scripts/pip install -r requirements.txt      # Windows
+#     .venv/bin/pip install -r requirements.txt          # Linux/macOS
 
-pillow>=9.0.0
-pytesseract>=0.3.10
-PyMuPDF>=1.22.0
-PyPDF2>=3.0.0
-pdfminer.six>=20221105
-beautifulsoup4>=4.12.0
-lxml>=4.9.0
-mistune>=2.0.0
+# --- Extracción de texto ---------------------------------------------------
+# PDF (759 archivos). PyMuPDF es el motor principal; PyPDF2 es el fallback
+# que usa extraer_pdf() y queda registrado en el log cuando entra en acción.
+pymupdf==1.28.2
+PyPDF2==3.0.1
 
-# Opcional (mejor soporte de formatos de imagen/codec):
-# pillow-avif-plugin
+# XLSX (4 archivos) y, sobre todo, el índice oficial del que sale el doc_id.
+openpyxl==3.1.5
+
+# Teselas vectoriales Mapbox (73 archivos .pbf).
+mapbox-vector-tile==2.2.0
+
+# --- OCR: 8 jpg + 1 avif, y 51 PDF escaneados sin capa de texto ------------
+#
+# pytesseract es solo el envoltorio: requiere el binario Tesseract instalado
+# en el sistema, con los idiomas spa/eng/por. Ver scripts/README_OCR.md.
+#
+# DEPENDENCIA NO FIJABLE POR PIP — ANOTARLA IMPORTA:
+#     Tesseract 5.5.3.20260724
+#
+# El determinismo del OCR depende de DOS cosas, y ninguna puede quedar
+# implícita:
+#   1. el DPI de rasterización -> fijado en extractores_datos.DPI_OCR_PDF = 300
+#   2. la versión del binario Tesseract -> esta de aquí arriba
+# Verificado: 5 informes escaneados, dos procesos separados, 5/5 sha256
+# idénticos del texto normalizado. Con otra versión del binario el texto
+# reconocido puede cambiar y el criterio 9 del reto (dos corridas -> mismo
+# sha256 del documents.jsonl) dejaría de cumplirse. Si se actualiza Tesseract,
+# hay que volver a correr la ingesta entera y actualizar este comentario.
+pytesseract==0.3.13
+pillow==12.3.0
+# Sin este plugin, Pillow no abre el .avif del corpus (SWF_Counterspace).
+pillow-avif-plugin==1.6.0
+
+# --- Detección de idioma ---------------------------------------------------
+# py3langid, NO langdetect: langdetect muestrea y da resultados distintos
+# entre corridas con el mismo texto. Ver el docstring de detectar_idioma.py.
+py3langid==0.3.0
+
+# --- Pruebas ---------------------------------------------------------------
+pytest==9.1.1
