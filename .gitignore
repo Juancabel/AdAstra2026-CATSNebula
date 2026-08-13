@@ -9,6 +9,8 @@
 #     python detectar_idioma.py data/documents.jsonl data/documents.jsonl
 /data/documents.jsonl
 /data/chunks.jsonl
+/data/fallos_ingesta_data.jsonl
+/data/reporte_idioma.json
 # Ambientes virtuales.
 
 /.venv
