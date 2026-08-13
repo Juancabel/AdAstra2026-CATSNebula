@@ -36,6 +36,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from corpus_paths import FORMATOS_VALIDOS, infer_fenomeno, infer_formato
 from dedup_pbf import construir_asignacion
 from extractores_datos import (
+    detectar_pies_plantilla,
     extraer_csv,
     extraer_imagen,
     extraer_json,
@@ -132,6 +133,7 @@ def construir_documento(
     info_oficial: dict,
     usar_ocr: bool = True,
     asignacion_pbf: dict | None = None,
+    pies_plantilla: dict | None = None,
 ) -> dict:
     """
     Convierte un archivo del corpus en un objeto del Contrato 1.
@@ -151,7 +153,10 @@ def construir_documento(
     institucion = institucion_de(ruta_relativa)
 
     if formato == "json":
-        texto, titulo, extra = extraer_json(ruta, institucion)
+        texto, titulo, extra = extraer_json(
+            ruta, institucion,
+            (pies_plantilla or {}).get(institucion),
+        )
     elif formato == "xlsx":
         texto, titulo, extra = extraer_xlsx(ruta)
     elif formato == "csv":
@@ -227,6 +232,16 @@ def ingestar(
     ruta_indice = raiz / "Indice_Datos_Codefest.xlsx"
     indice_oficial = cargar_indice_oficial(ruta_indice)
     print(f"Índice oficial cargado: {len(indice_oficial)} archivos registrados\n")
+
+    # Pies de plantilla de los JSON de artículo web: se calculan UNA vez sobre
+    # todo el corpus, igual que la asignación de teselas. La repetición solo se
+    # ve mirando varios artículos del mismo sitio a la vez.
+    pies_plantilla = detectar_pies_plantilla(raiz)
+    if pies_plantilla:
+        print("Pies de plantilla detectados en los JSON de artículo web:")
+        for institucion in sorted(pies_plantilla):
+            print(f"  {institucion:<52} {len(pies_plantilla[institucion])} patrón(es)")
+        print()
 
     # Deduplicación de tiles PBF: se calcula UNA vez, antes del bucle.
     asignacion_pbf = None
@@ -313,7 +328,8 @@ def ingestar(
 
         try:
             doc = construir_documento(
-                ruta, raiz, formato, info_oficial, usar_ocr, asignacion_pbf
+                ruta, raiz, formato, info_oficial, usar_ocr, asignacion_pbf,
+                pies_plantilla,
             )
         except ValueError as e:
             fallos.append((ruta_relativa, str(e)))
@@ -344,6 +360,14 @@ def ingestar(
                 (ruta_relativa,
                  f"PDF extraído con PyPDF2 tras fallar PyMuPDF: "
                  f"{doc['extra'].get('aviso_pdf')}")
+            )
+
+        # La limpieza de boilerplate se pasó del 40% y no se aplicó: el
+        # documento conserva su texto original y necesita revisión manual.
+        if doc["extra"].get("limpieza_omitida"):
+            avisos.append(
+                (ruta_relativa,
+                 f"limpieza de boilerplate OMITIDA: {doc['extra'].get('limpieza_motivo')}")
             )
 
         # Un PDF escaneado que pasó por OCR: el texto es reconocido, no leído.

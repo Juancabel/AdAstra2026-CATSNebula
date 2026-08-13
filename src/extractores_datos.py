@@ -12,6 +12,7 @@ Ninguno lanza excepción por contenido vacío: eso lo decide ingest_data.py
 al llamar a compute_doc_id().
 """
 
+import collections
 import csv
 import json
 from datetime import date, datetime
@@ -19,6 +20,7 @@ from pathlib import Path
 import re
 
 from mapeos_json import (
+    ARCHIVOS_EXCLUIDOS,
     ATRIBUTOS_PBF_DESCARTADOS,
     MAPEO_ALERTAS,
     ATRIBUTOS_PBF_PRIORITARIOS,
@@ -238,6 +240,107 @@ def componer_titulo_alerta(datos: dict) -> str | None:
     return None
 
 
+# --- Pies de plantilla en los JSON de artículo web --------------------------
+#
+# Los scrapers dejaron dentro de `body_paragraphs` el pie de la página: el
+# "About us" del observatorio, el copyright, la dirección postal, el "Related
+# Experts:". Queda pegado al final del último párrafo real y produce chunks que
+# empiezan a mitad de una oración ajena.
+#
+# Igual que con los PDF: se detecta por REPETICIÓN entre artículos del mismo
+# sitio, no por palabras clave — así no depende del idioma ni del formato
+# exacto del byline.
+MIN_ARTICULOS_PIE = 3
+
+# Palabras de la firma por cada extremo. Comparar solo las primeras y últimas
+# permite que cambie el nombre del autor en mitad del pie.
+PALABRAS_FIRMA = 6
+
+
+def _firma_parrafo(parrafo: str) -> tuple[str, str]:
+    """Firma laxa de un párrafo: primeras y últimas PALABRAS_FIRMA palabras."""
+    palabras = " ".join(parrafo.split()).lower().split()
+    if not palabras:
+        return ("", "")
+    return (" ".join(palabras[:PALABRAS_FIRMA]), " ".join(palabras[-PALABRAS_FIRMA:]))
+
+
+def _parrafos_de_articulo(datos, mapeo) -> list[str]:
+    """Los párrafos que el mapeo extraería de este JSON, en orden."""
+    objetos = ([d for d in datos if isinstance(d, dict)]
+               if isinstance(datos, list) else [datos])
+    parrafos = []
+    for obj in objetos:
+        if not isinstance(obj, dict):
+            continue
+        for campo in mapeo["texto"]:
+            parrafos.extend(t for t in extraer_ruta(obj, campo) if t.strip())
+    return parrafos
+
+
+def detectar_pies_plantilla(raiz: Path) -> dict[str, set]:
+    """
+    Encuentra los pies de plantilla de cada observatorio de artículo web.
+
+    Se calcula UNA vez sobre todo el corpus antes de la ingesta, igual que
+    dedup_pbf.construir_asignacion: la repetición solo se ve mirando varios
+    artículos a la vez, y un extractor que procesa un archivo no puede verla.
+
+    Un párrafo es pie de plantilla si cumple LAS DOS condiciones:
+
+      1. cierra al menos MIN_ARTICULOS_PIE artículos del mismo observatorio, y
+      2. NO aparece nunca a mitad del cuerpo de ningún artículo del sitio.
+
+    La segunda no es un adorno. Sin ella se borraba contenido real: en
+    SWF_Counterspace el párrafo "Since 2010, Russia has been testing..." cierra
+    9 artículos, pero es un resumen que el observatorio reutiliza, y en otros
+    artículos aparece en mitad del texto. Un pie de plantilla, por definición,
+    nunca cae a mitad de cuerpo; un párrafo reutilizado sí.
+
+    Returns:
+        {institucion: {firma, ...}} — determinista, sin estado entre corridas.
+    """
+    finales = collections.defaultdict(collections.Counter)
+    interiores = collections.defaultdict(set)
+
+    for ruta in sorted(raiz.rglob("*.json")):
+        ruta_relativa = ruta.relative_to(raiz).as_posix()
+        partes = ruta_relativa.split("/")
+        if len(partes) < 2:
+            continue
+        institucion = "/".join(partes[:2])
+        mapeo = MAPEOS_POR_INSTITUCION.get(institucion)
+        if mapeo is not FAMILIA_ARTICULO_WEB:
+            continue
+        if ruta.name in ARCHIVOS_EXCLUIDOS or es_catalogo(ruta):
+            continue
+
+        try:
+            datos = json.loads(ruta.read_text(encoding="utf-8", errors="replace"))
+        except (json.JSONDecodeError, OSError):
+            continue
+
+        parrafos = _parrafos_de_articulo(datos, mapeo)
+        if len(parrafos) < 2:
+            continue
+
+        finales[institucion][_firma_parrafo(parrafos[-1])] += 1
+        for p in parrafos[:-1]:
+            interiores[institucion].add(_firma_parrafo(p))
+
+    plantillas = {}
+    for institucion, cuenta in finales.items():
+        detectadas = {
+            firma for firma, n in cuenta.items()
+            if n >= MIN_ARTICULOS_PIE
+            and firma not in interiores[institucion]
+            and any(firma)
+        }
+        if detectadas:
+            plantillas[institucion] = detectadas
+    return plantillas
+
+
 def es_indice_teselas(ruta: Path) -> bool:
     """Detecta el manifiesto de descarga de teselas (AMAZONUW_tiles-index.json)."""
     return "tiles-index" in ruta.name.lower()
@@ -292,13 +395,17 @@ def extraer_indice_teselas(datos) -> tuple[str, str | None, dict]:
     return "\n".join(lineas), "Índice de teselas — Amazon Underworld", extra
 
 
-def extraer_json(ruta: Path, institucion: str) -> tuple[str, str | None, dict]:
+def extraer_json(ruta: Path, institucion: str,
+                 pies_plantilla: set | None = None) -> tuple[str, str | None, dict]:
     """
     Extrae texto de un archivo JSON según el mapeo de su institución.
 
     Args:
         ruta: ruta al archivo.
         institucion: clave de MAPEOS_POR_INSTITUCION.
+        pies_plantilla: firmas de pie de este observatorio, de
+            detectar_pies_plantilla(). Los párrafos finales que casen se
+            descartan. Sin este argumento no se limpia nada.
 
     Returns:
         (texto, titulo, extra)
@@ -341,7 +448,19 @@ def extraer_json(ruta: Path, institucion: str) -> tuple[str, str | None, dict]:
             textos = extraer_ruta(obj, campo)
             bloques.extend(textos)
 
-    texto = "\n\n".join(b.strip() for b in bloques if b.strip())
+    bloques = [b.strip() for b in bloques if b.strip()]
+
+    # Pie de plantilla: se recortan los párrafos finales que coincidan, no solo
+    # el último — hay sitios que encadenan dos (copyright + "Related Experts").
+    # Solo desde el final: la misma firma a mitad de cuerpo es contenido, y
+    # detectar_pies_plantilla() ya descartó las firmas que aparecen ahí.
+    pies_recortados = 0
+    if pies_plantilla:
+        while len(bloques) > 1 and _firma_parrafo(bloques[-1]) in pies_plantilla:
+            bloques.pop()
+            pies_recortados += 1
+
+    texto = "\n\n".join(bloques)
 
     # Red de seguridad: si el mapeo de la institución no encontró nada, el
     # archivo puede tener una estructura distinta a la del resto de su fuente
@@ -367,6 +486,8 @@ def extraer_json(ruta: Path, institucion: str) -> tuple[str, str | None, dict]:
             valores = extraer_ruta(objetos[0], campo)
             if valores:
                 extra[campo.split(".")[-1]] = valores[0]
+    if pies_recortados:
+        extra["pies_plantilla_recortados"] = pies_recortados
 
     return texto, titulo, extra
 
@@ -424,6 +545,192 @@ def extraer_html(ruta: Path) -> tuple[str, str | None, dict]:
     return s, None, {}
 
 
+# --- Boilerplate repetido de los PDF ----------------------------------------
+#
+# El 73% de los chunks de PDF no terminaban en signo de cierre. No era culpa
+# del chunker: le llegaban unidades que mezclaban el final de una oración con
+# el encabezado de la página siguiente, que PyMuPDF emite como texto más.
+#
+# El principio es el mismo que ya se usó en dedup_pbf: DETECTAR REPETICIÓN, no
+# adivinar contenido. No hay lista de palabras prohibidas; se elimina lo que se
+# repite tanto entre páginas que no puede ser el cuerpo del documento.
+#
+# Medido sobre la muestra de la Fase 0 (6 PDF, de 51 a 1.330 páginas), la
+# primera línea normalizada de cada página se repite en el 82%, 99,9%, 98%,
+# 99,8%, 49%+46% y 41%+39% de las páginas respectivamente. Los dos últimos
+# alternan encabezado par/impar, que es justo lo que obliga a que el umbral
+# sea bajo: con 50% se escaparían.
+UMBRAL_REPETICION_PAGINA = 0.30
+
+# Ventana de líneas candidatas por página. El encabezado NO es una línea: en
+# AI_Index son seis consecutivas ("Artificial Intelligence" / "Index Report
+# 2024" / "CHAPTER 1:" / "Research and" / "Development" + numeración). Mirar
+# solo la primera línea dejaba intacto justo el boilerplate del caso original.
+# 8/4 da margen sobre ese bloque de 6 sin arriesgar: ampliar la ventana amplía
+# qué se EVALÚA, no qué se borra — el umbral del 30% sigue protegiendo al
+# contenido único.
+VENTANA_CABECERA = 8
+VENTANA_PIE = 4
+
+# Salvaguarda: si la limpieza se llevaría más de esta fracción de las palabras
+# del documento, NO se aplica y el documento se marca para revisión manual.
+# Mismo espíritu que "conservar metadata sin inventar contenido": mejor una
+# nota de cobertura que un documento vaciado por un patrón mal detectado.
+MAX_FRACCION_ELIMINABLE = 0.40
+
+_RE_DIGITOS = re.compile(r"\d+")
+
+# Numeración de página: solo dígitos, o "Page 4", "4 / 120", "- 12 -".
+_RE_NUMERACION = re.compile(
+    r"^(?:p(?:age|ág?\.?|\.)\s*)?[-–—\s]*\d+(?:\s*(?:/|\||de|of)\s*\d+)?[-–—\s]*$",
+    re.IGNORECASE,
+)
+
+
+def _es_numeracion(linea: str) -> bool:
+    """La línea es solo un número de página, con o sin adornos."""
+    return bool(_RE_NUMERACION.match(linea.strip()))
+
+
+def _normalizar_linea(linea: str) -> str:
+    """
+    Forma canónica para comparar líneas entre páginas.
+
+    Los dígitos pasan a '#' para que "Page 4" y "Page 5" cuenten como la misma
+    línea; sin eso ningún encabezado con numeración se detectaría nunca.
+
+    El precio conocido: en AI_Index los rótulos "Figure 1.3.1" y "Figure 1.3.4"
+    colapsan en "Figure #.#.#" y se van con el boilerplate (20 líneas de tres
+    palabras, ya separadas de su figura por el orden de extracción). Se acepta:
+    la alternativa —exigir que la forma cruda también se repita— desactivaría
+    justo el caso que hay que cazar.
+    """
+    return _RE_DIGITOS.sub("#", " ".join(linea.split())).strip()
+
+
+def _indices_ventana(n: int) -> set[int]:
+    """Posiciones de las primeras VENTANA_CABECERA y últimas VENTANA_PIE."""
+    return set(range(min(VENTANA_CABECERA, n))) | set(
+        range(max(0, n - VENTANA_PIE), n)
+    )
+
+
+def limpiar_boilerplate_paginas(paginas: list[str]) -> tuple[list[str], dict]:
+    """
+    Quita numeración y encabezados/pies repetidos de un PDF ya paginado.
+
+    Args:
+        paginas: texto de cada página, en orden.
+
+    Returns:
+        (paginas_limpias, diagnostico). El diagnóstico lleva qué se eliminó y
+        cuánto, para que ingest_data.py lo registre en el log: una limpieza
+        silenciosa es tan mala como el boilerplate.
+    """
+    # Cada página como lista de líneas no vacías.
+    por_pagina = [
+        [l.strip() for l in pagina.splitlines() if l.strip()] for pagina in paginas
+    ]
+    con_texto = [p for p in por_pagina if p]
+    if len(con_texto) < 2:
+        # Sin al menos dos páginas no hay repetición que medir.
+        return paginas, {"lineas_eliminadas": 0}
+
+    # PASO 1 — Numeración de página, antes que nada. Se descarta sin exigir
+    # repetición, pero SOLO dentro de la ventana: un "2010" suelto en mitad de
+    # la página es la etiqueta del eje de una gráfica, no un número de página.
+    numeracion_fuera = 0
+    sin_numeracion = []
+    for lineas in por_pagina:
+        ventana = _indices_ventana(len(lineas))
+        conservadas = []
+        for i, linea in enumerate(lineas):
+            if i in ventana and _es_numeracion(linea):
+                numeracion_fuera += 1
+                continue
+            conservadas.append(linea)
+        sin_numeracion.append(conservadas)
+
+    # PASO 2 — Recalcular la ventana ya sin numeración: así el encabezado real
+    # ocupa las 8 posiciones y no las desperdicia en el número de página.
+    conteo = collections.Counter()
+    for lineas in sin_numeracion:
+        if not lineas:
+            continue
+        ventana = _indices_ventana(len(lineas))
+        # set(): una línea repetida dos veces en la MISMA página cuenta una vez.
+        for forma in {_normalizar_linea(lineas[i]) for i in ventana}:
+            if forma:
+                conteo[forma] += 1
+
+    n_paginas = sum(1 for p in sin_numeracion if p)
+    minimo = max(2, int(n_paginas * UMBRAL_REPETICION_PAGINA))
+    repetidas = {forma for forma, n in conteo.items() if n >= minimo}
+
+    # PASO 3 — Eliminar las repetidas, solo donde aparecen en la ventana. Fuera
+    # de ella la misma cadena puede ser contenido legítimo: "Development" es
+    # encabezado arriba y palabra normal en mitad de un párrafo.
+    limpias = []
+    eliminadas = 0
+    for lineas in sin_numeracion:
+        if not lineas:
+            limpias.append("")
+            continue
+        ventana = _indices_ventana(len(lineas))
+        conservadas = []
+        for i, linea in enumerate(lineas):
+            if i in ventana and _normalizar_linea(linea) in repetidas:
+                eliminadas += 1
+                continue
+            conservadas.append(linea)
+        limpias.append("\n".join(conservadas))
+
+    diagnostico = {
+        "lineas_eliminadas": eliminadas + numeracion_fuera,
+        "numeracion_eliminada": numeracion_fuera,
+        "encabezados_pies_eliminados": eliminadas,
+        "patrones_detectados": sorted(repetidas)[:10],
+        "n_patrones": len(repetidas),
+    }
+    return limpias, diagnostico
+
+
+def _aplicar_limpieza(paginas: list[str]) -> tuple[str, dict]:
+    """
+    Limpia el boilerplate y aplica la salvaguarda del 40%.
+
+    Devuelve (texto, extra_parcial). Si la limpieza se pasa de la raya, se
+    devuelve el texto ORIGINAL y el diagnóstico dice por qué, para que el
+    documento se revise a mano en vez de quedarse vaciado.
+    """
+    original = "\n\n".join(paginas)
+    limpias, diag = limpiar_boilerplate_paginas(paginas)
+    limpio = "\n\n".join(p for p in limpias if p.strip())
+
+    palabras_antes = len(original.split())
+    palabras_despues = len(limpio.split())
+    if not palabras_antes:
+        return original, {}
+
+    fraccion = 1 - (palabras_despues / palabras_antes)
+    extra = {
+        "limpieza_lineas": diag.get("lineas_eliminadas", 0),
+        "limpieza_fraccion_palabras": round(fraccion, 4),
+    }
+    if diag.get("n_patrones"):
+        extra["limpieza_patrones"] = diag["patrones_detectados"]
+
+    if fraccion > MAX_FRACCION_ELIMINABLE:
+        extra["limpieza_omitida"] = True
+        extra["limpieza_motivo"] = (
+            f"habría eliminado el {fraccion * 100:.1f}% de las palabras "
+            f"(máximo {MAX_FRACCION_ELIMINABLE * 100:.0f}%): requiere revisión manual"
+        )
+        return original, extra
+
+    return limpio, extra
+
+
 # --- OCR de PDF escaneados --------------------------------------------------
 #
 # DPI de rasterizacion. FIJO Y EXPLICITO a proposito: junto con la version de
@@ -451,8 +758,14 @@ IDIOMAS_OCR_PDF = "spa+eng"
 MIN_CARACTERES_PDF_POR_PAGINA = 50
 
 
-def _ocr_pdf(ruta: Path, paginas_max: int | None = None) -> str:
-    """Rasteriza cada pagina a DPI fijo y le pasa Tesseract."""
+def _ocr_pdf(ruta: Path, paginas_max: int | None = None) -> list[str]:
+    """
+    Rasteriza cada pagina a DPI fijo y le pasa Tesseract.
+
+    Devuelve la lista POR PAGINA, no el texto unido: los escaneados tambien
+    llevan encabezado repetido, y sin la separacion por pagina no se puede
+    detectar. Une el llamador, despues de limpiar.
+    """
     import io
 
     import fitz
@@ -470,7 +783,7 @@ def _ocr_pdf(ruta: Path, paginas_max: int | None = None) -> str:
             partes.append(pytesseract.image_to_string(imagen, lang=IDIOMAS_OCR_PDF))
     finally:
         doc.close()
-    return "\n\n".join(partes)
+    return partes
 
 
 def extraer_pdf(ruta: Path, usar_ocr: bool = True) -> tuple[str, str | None, dict]:
@@ -505,15 +818,16 @@ def extraer_pdf(ruta: Path, usar_ocr: bool = True) -> tuple[str, str | None, dic
             n_paginas = doc.page_count
         finally:
             doc.close()
-        texto = "\n\n".join(partes)
-        extra = {"motor_pdf": "pymupdf", "paginas": n_paginas}
+        texto, extra_limpieza = _aplicar_limpieza(partes)
+        extra = {"motor_pdf": "pymupdf", "paginas": n_paginas, **extra_limpieza}
 
         # ¿Trae capa de texto? Si no, está escaneado y hay que rasterizar.
         if usar_ocr and n_paginas and (
             len(texto) / n_paginas < MIN_CARACTERES_PDF_POR_PAGINA
         ):
             caracteres_previos = len(texto)
-            texto_ocr = _ocr_pdf(ruta)
+            paginas_ocr = _ocr_pdf(ruta)
+            texto_ocr, extra_limpieza_ocr = _aplicar_limpieza(paginas_ocr)
             # Solo se acepta el OCR si aporta más de lo que ya había: si
             # Tesseract devuelve menos, el original imperfecto es mejor que
             # una página en blanco.
@@ -526,6 +840,7 @@ def extraer_pdf(ruta: Path, usar_ocr: bool = True) -> tuple[str, str | None, dic
                     "ocr_dpi": DPI_OCR_PDF,
                     "ocr_idiomas": IDIOMAS_OCR_PDF,
                     "caracteres_capa_texto": caracteres_previos,
+                    **extra_limpieza_ocr,
                 }
         return texto, None, extra
     except ImportError as e:
@@ -549,14 +864,16 @@ def extraer_pdf(ruta: Path, usar_ocr: bool = True) -> tuple[str, str | None, dic
                 paginas_fallidas += 1
             if t:
                 partes.append(t)
+        texto, extra_limpieza = _aplicar_limpieza(partes)
         extra = {
             "motor_pdf": "pypdf2",
             "paginas": len(reader.pages),
             "aviso_pdf": motivo_fallback,
+            **extra_limpieza,
         }
         if paginas_fallidas:
             extra["paginas_fallidas"] = paginas_fallidas
-        return "\n\n".join(partes), None, extra
+        return texto, None, extra
     except Exception as e:  # noqa: BLE001
         raise ValueError(
             "El extractor de PDF requiere 'PyMuPDF' (fitz) o 'PyPDF2' instalado. "
