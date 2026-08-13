@@ -61,9 +61,14 @@ python scripts/verificar_indice.py entrega/base_vectorial/encoder_bge-m3
 
 **La corrida completa va en GPU.** Medido en el CPU del equipo (Ryzen 5 5600G,
 fp32): 6,9 s/chunk, o sea ~164 h para los 86.046 chunks. En GPU son 1-4 h según
-la tarjeta. `scripts/colab_encode_index.ipynb` hace el recorrido completo en
-Colab (muestra → verificación → corrida → verificación) dejando la salida en
-Drive, para que `--reanudar` sirva de algo si Colab corta la sesión.
+la tarjeta. Hay un notebook por plataforma, mismo recorrido en los dos
+(muestra → verificación → corrida → verificación):
+
+* `scripts/kaggle_encode_index.ipynb` — **el recomendado**. Sesión de 12 h
+  garantizadas y la salida sobrevive con `Save & Run All`. Entrada como dataset,
+  salida en `/kaggle/working`.
+* `scripts/colab_encode_index.ipynb` — Colab gratis corta cerca de las 4 h. La
+  salida va a Drive para que `--reanudar` sirva de algo cuando eso pase.
 
 `index.faiss` y `metadata.jsonl` no se versionan (superan el límite de 100 MB
 de GitHub); `manifiesto.json` sí, y guarda revisión del modelo, versiones,
