@@ -52,5 +52,27 @@ pillow-avif-plugin==1.6.0
 # entre corridas con el mismo texto. Ver el docstring de detectar_idioma.py.
 py3langid==0.3.0
 
+# --- Embeddings e índice vectorial (encode_index.py) -----------------------
+#
+# Encoder: BAAI/bge-m3, revisión 5617a9f61b028005a4858fdac845db406aefb181.
+# El nombre del modelo NO alcanza como pin: HuggingFace puede mover el `main`
+# del repo y los pesos cambiarían sin que cambie ninguna versión de aquí. La
+# revisión vive en encode_index.REVISION y queda copiada en cada manifiesto.
+#
+# torch va en CPU a propósito: es donde evalúan los organizadores y donde el
+# determinismo se sostiene (fp16/bf16 y TF32 quedan descartados en el script).
+# El wheel +cpu NO está en PyPI, necesita el índice de PyTorch:
+#     pip install --index-url https://download.pytorch.org/whl/cpu torch==2.13.0
+# En una máquina con GPU, `pip install torch==2.13.0` a secas también sirve:
+# los vectores no serán bit-idénticos a los de CPU, y el manifiesto lo registra.
+torch==2.13.0
+transformers==5.15.0
+sentence-transformers==5.7.0
+tokenizers==0.22.2
+
+# IndexFlatIP: búsqueda exacta, sin entrenamiento ni semillas. IVF/HNSW
+# introducirían no-determinismo por orden de inserción y clustering.
+faiss-cpu==1.15.0
+
 # --- Pruebas ---------------------------------------------------------------
 pytest==9.1.1

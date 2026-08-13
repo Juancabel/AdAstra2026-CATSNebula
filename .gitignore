@@ -11,6 +11,16 @@
 /data/chunks.jsonl
 /data/fallos_ingesta_data.jsonl
 /data/reporte_idioma.json
+# Indice vectorial. index.faiss son ~336 MB (86.046 x 1024 x 4 B) y
+# metadata.jsonl ~240 MB: los dos por encima del limite de 100 MB por archivo
+# de GitHub. Se regeneran con:
+#     python encode_index.py data/chunks.jsonl entrega/base_vectorial/encoder_bge-m3
+# El manifiesto SI se versiona: es la trazabilidad de que corrida produjo la
+# entrega (revision del modelo, versiones, sha256 de los dos artefactos).
+/entrega/base_vectorial/*/index.faiss
+/entrega/base_vectorial/*/metadata.jsonl
+/entrega/base_vectorial/*/.parcial/
+
 # Ambientes virtuales.
 
 /.venv

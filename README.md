@@ -41,6 +41,47 @@ La huella del contenido (`content_sha1`) sigue existiendo dentro de `extra`,
 pero ya no es identidad: solo sirve para detectar documentos con texto idéntico
 y `doc_id` distintos.
 
+## Índice vectorial (`entrega/base_vectorial/`)
+
+`encode_index.py` encodea `data/chunks.jsonl` con **BAAI/bge-m3** (dense,
+1024-dim, revisión `5617a9f6…` fijada en el script) y construye un
+`IndexFlatIP` sobre vectores L2-normalizados — que es coseno con búsqueda
+exacta. A 86.046 vectores el índice son ~336 MB y la búsqueda es sub-segundo
+en CPU, así que IVF/HNSW no aportan nada y sí traerían no-determinismo.
+
+```bash
+# 1. medir antes de comprometer: muestra estratificada por fenómeno
+python encode_index.py data/chunks.jsonl salida_muestra --muestra 500
+python scripts/verificar_indice.py salida_muestra --n 30
+
+# 2. corrida completa (larga; --reanudar la continúa si se corta)
+python encode_index.py data/chunks.jsonl entrega/base_vectorial/encoder_bge-m3
+python scripts/verificar_indice.py entrega/base_vectorial/encoder_bge-m3
+```
+
+**La corrida completa va en GPU.** Medido en el CPU del equipo (Ryzen 5 5600G,
+fp32): 6,9 s/chunk, o sea ~164 h para los 86.046 chunks. En GPU son 1-4 h según
+la tarjeta. `scripts/colab_encode_index.ipynb` hace el recorrido completo en
+Colab (muestra → verificación → corrida → verificación) dejando la salida en
+Drive, para que `--reanudar` sirva de algo si Colab corta la sesión.
+
+`index.faiss` y `metadata.jsonl` no se versionan (superan el límite de 100 MB
+de GitHub); `manifiesto.json` sí, y guarda revisión del modelo, versiones,
+dispositivo y `sha256` de los dos artefactos.
+
+**El mapeo 1:1** (ID interno `i` de FAISS == línea `i` de `metadata.jsonl`) es
+lo único que no puede fallar aquí: si se desalinea, el índice sigue
+recuperando "algo" con puntajes razonables y devuelve el texto equivocado.
+`scripts/verificar_indice.py` lo comprueba en un proceso nuevo re-encodeando
+una muestra y comparando contra `index.reconstruct(i)`. Verificado contra un
+control negativo: rotar `metadata.jsonl` una sola línea baja el peor coseno de
+1.000000 a 0.34.
+
+`metadata.jsonl` añade sobre el Contrato 2: `num_tokens` recalculado con el
+tokenizador real de BGE-M3 (el de `chunks.jsonl` es palabras × 1.9, y queda
+guardado como `num_tokens_estimado`) y `catalogo_masivo`, la bandera de los
+8.750 chunks de catálogo que necesitan `subdividir_para_salida()` al responder.
+
 ## Comprobaciones
 
 ```bash
