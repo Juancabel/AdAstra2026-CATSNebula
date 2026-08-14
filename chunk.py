@@ -360,8 +360,48 @@ def segmentar_documento(doc: dict, maximo: int = MAXIMO_PALABRAS) -> list[str]:
     return unidades
 
 
+# --- No cerrar chunk sobre una unidad colgante ------------------------------
+#
+# APAGADO POR DEFECTO (`empaquetar(extender_colgantes=False)`), a la espera de
+# medición en muestra.
+#
+# El problema: cuando la última unidad de un chunk es corta y no cierra oración
+# (un encabezado de sección, una leyenda de figura, un número de tabla), el
+# chunk termina a media frase. Aislar esa unidad en la extracción no lo
+# arreglaba —medido: movía 1 chunk de 433— porque una unidad sin punto sigue
+# sin punto cuando le toca cerrar. Lo que sí puede arreglarlo es no cerrar ahí.
+#
+# El riesgo es el efecto en cascada: un chunk que se extiende empuja al
+# siguiente, que también se extiende. Por eso hay DOS topes duros —número de
+# extensiones por chunk y techo de palabras— y el contador se reinicia con cada
+# chunk cerrado.
+TERMINADORES_UNIDAD = (".", "!", "?", "…", "\"", "'", "”", "’", ")", "»", "]",
+                       ":", ";", "؟", "؛")
+
+# Una unidad más larga que esto ya es una oración por derecho propio: aunque no
+# lleve punto, cerrar el chunk ahí no es un corte a media frase.
+MAX_PALABRAS_COLGANTE = 12
+
+# Cuántas unidades extra puede absorber un chunk por este criterio. Con 2 se
+# corta la cascada: pasado ese punto el chunk cierra aunque siga colgando.
+MAX_EXTENSIONES_COLGANTE = 2
+
+# Techo absoluto al extender, en fracción del objetivo. 1.2 * 200 = 240
+# palabras, por debajo de MAXIMO_PALABRAS (250) y del contexto de BGE-M3.
+FACTOR_TECHO_COLGANTE = 1.2
+
+
+def _es_colgante(unidad: str) -> bool:
+    """Unidad corta que no cierra oración: mal sitio para terminar un chunk."""
+    limpia = unidad.rstrip()
+    if not limpia or limpia.endswith(TERMINADORES_UNIDAD):
+        return False
+    return _palabras(limpia) <= MAX_PALABRAS_COLGANTE
+
+
 def empaquetar(unidades: list[str], objetivo: int = OBJETIVO_PALABRAS,
-               maximo: int = MAXIMO_PALABRAS, separador: str = " ") -> list[str]:
+               maximo: int = MAXIMO_PALABRAS, separador: str = " ",
+               extender_colgantes: bool = False) -> list[str]:
     """
     Fase 2 (barata, se repite en el barrido): junta unidades en chunks.
 
@@ -369,19 +409,38 @@ def empaquetar(unidades: list[str], objetivo: int = OBJETIVO_PALABRAS,
     que es exactamente el "retroceder al último límite completo" del §3.3.
     Sin solapamiento: duplicar texto gasta puestos del top-10 y distorsiona la
     agregación a nivel documento.
+
+    Args:
+        extender_colgantes: si el chunk fuera a cerrarse sobre una unidad corta
+            sin cierre de oración, absorber la siguiente en vez de cerrar.
+            Acotado por MAX_EXTENSIONES_COLGANTE y por el techo de palabras.
     """
+    techo = int(objetivo * FACTOR_TECHO_COLGANTE)
     chunks, actual, n = [], [], 0
+    extensiones = 0
+
+    def puede_extender(palabras_extra: int) -> bool:
+        return (extender_colgantes
+                and actual
+                and _es_colgante(actual[-1])
+                and extensiones < MAX_EXTENSIONES_COLGANTE
+                and n + palabras_extra <= techo)
+
     for unidad in unidades:
         p = _palabras(unidad)
         if actual and n + p > objetivo:
-            chunks.append(separador.join(actual))
-            actual, n = [], 0
+            if puede_extender(p):
+                extensiones += 1          # no se cierra: absorbe esta unidad
+            else:
+                chunks.append(separador.join(actual))
+                actual, n, extensiones = [], 0, 0
         actual.append(unidad)
         n += p
-        # Una sola unidad ya pasada del objetivo cierra chunk por sí misma.
-        if n >= objetivo:
+        # Una sola unidad ya pasada del objetivo cierra chunk por sí misma,
+        # salvo que lo que quede colgando sea un fragmento sin cerrar.
+        if n >= objetivo and not puede_extender(0):
             chunks.append(separador.join(actual))
-            actual, n = [], 0
+            actual, n, extensiones = [], 0, 0
     if actual:
         chunks.append(separador.join(actual))
     return chunks
@@ -422,13 +481,16 @@ def _contar_tokens(texto: str, tokenizador=None) -> tuple[int, bool]:
 
 def chunkear_documento(doc: dict, objetivo: int = OBJETIVO_PALABRAS,
                        maximo: int = MAXIMO_PALABRAS, tokenizador=None,
-                       unidades: list[str] | None = None) -> list[dict]:
+                       unidades: list[str] | None = None,
+                       extender_colgantes: bool = False) -> list[dict]:
     """
     Convierte un documento del Contrato 1 en una lista de objetos del Contrato 2.
 
     Args:
         unidades: segmentación ya calculada (de la caché). Si es None se
             calcula aquí.
+        extender_colgantes: ver empaquetar(). Solo afecta al empaquetado, no a
+            la segmentación, así que NO invalida la caché.
     """
     if unidades is None:
         unidades = segmentar_documento(doc, maximo)
@@ -450,7 +512,9 @@ def chunkear_documento(doc: dict, objetivo: int = OBJETIVO_PALABRAS,
     contexto = construir_contexto(doc)
 
     salida = []
-    for posicion, texto in enumerate(empaquetar(unidades, objetivo_pack, maximo, separador)):
+    empaquetados = empaquetar(unidades, objetivo_pack, maximo, separador,
+                              extender_colgantes=extender_colgantes)
+    for posicion, texto in enumerate(empaquetados):
         num_tokens, _ = _contar_tokens(texto, tokenizador)
         salida.append({
             "doc_id": doc_id,
@@ -529,6 +593,11 @@ def chunkear_jsonl(entrada: Path, salida: Path, objetivo: int = OBJETIVO_PALABRA
             chunks = chunkear_documento(
                 doc, objetivo, maximo, tokenizador,
                 unidades=unidades_cache.get(doc["doc_id"]),
+                # Aprobado para produccion. Medido en la muestra: 455 -> 342
+                # corte_real (-24,8%), techo respetado (max 240 = 1,2x exacto),
+                # 0 chunks sobre el limite de BGE-M3. El parametro sigue en
+                # False por defecto para que los A/B midan contra la base real.
+                extender_colgantes=True,
             )
             if not chunks:
                 rep["documentos_sin_chunks"].append(doc.get("fuente"))

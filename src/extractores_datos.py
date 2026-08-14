@@ -695,17 +695,475 @@ def limpiar_boilerplate_paginas(paginas: list[str]) -> tuple[list[str], dict]:
     return limpias, diagnostico
 
 
-def _aplicar_limpieza(paginas: list[str]) -> tuple[str, dict]:
+# --- Líneas que no son prosa, en mitad de la página -------------------------
+#
+# APAGADO POR DEFECTO (`_aplicar_limpieza(aislar=False)`). MEDIDO Y NO PAGA:
+# sobre la muestra de 19 documentos de scripts/ab_extraccion.py, aislar 1.185
+# líneas mueve UN chunk de 433 (corte_real 42,9% -> 42,7%) y empeora tres
+# documentos. No justifica una reingesta de 70 min ni invalidar la caché de
+# chunking. El motivo es estructural y se explica al final de este bloque.
+# Se deja implementado y apagado para que la medición sea reproducible y para
+# que activarlo sea un flag, no volver a escribirlo.
+#
+# El limpiador de arriba solo mira la ventana de cabecera/pie y solo borra lo
+# que se REPITE. Quedan fuera dos cosas medidas en la muestra:
+#
+#   1. Encabezados de sección con alcance de sección, no de documento:
+#      "1.1 Publications" sale en 8 de las 51 páginas de AIINDEX-001 y "1.2
+#      Patents" en otras 8. Están en la ventana, pero ninguno llega al 30% de
+#      UMBRAL_REPETICION_PAGINA, así que sobreviven. Bajar el umbral no es la
+#      salida: se llevaría contenido único por delante.
+#   2. Etiquetas de datos de gráficas: "0.05, Clinical trial", "1.46%, Other".
+#      No las caza clasificar_residual.py porque no llevan "Chart:"/"Source:"
+#      ni cola numérica pura.
+#
+# LO QUE SE HACE NO ES BORRAR, ES SEPARAR. Un encabezado de sección es
+# contenido legítimo y recuperable; el problema no es que esté, es que llega
+# pegado al final de la oración anterior — "…conference papers. 1.1
+# Publications Total Number of AI Publications" — y el chunker, que nunca
+# parte una unidad, se lo come entero.
+#
+# El texto de las páginas se une con "\n\n" y chunk.py parte párrafos justo
+# ahí (`re.split(r"\n\s*\n")`), así que rodear la línea de líneas en blanco
+# la convierte en su propia unidad. Cero contenido perdido, y un falso
+# positivo cuesta un salto de párrafo de más, no un borrado.
+#
+# El coste de equivocarse es asimétrico y por eso las guardas son estrictas:
+# aislar una línea que SÍ era prosa parte una oración en dos, que es
+# exactamente el defecto que se quiere arreglar. De ahí las dos condiciones de
+# contexto: solo se aísla si la línea anterior YA cerró oración (no se corta
+# nada a medias) y si la siguiente no es su continuación en minúscula.
+#
+# POR QUÉ NO MOVIÓ LA MÉTRICA (lo que enseñó la medición):
+# separar el encabezado no lo hace desaparecer, lo convierte en una unidad
+# propia — y una unidad que no termina en punto sigue sin terminar en punto
+# cuando le toca caer al final de un chunk. El caso de referencia del brief,
+# "…no access. 1.3 Frontier AI Research Chapter 1: Research and Development",
+# sigue contando como corte_real después del fix. La métrica solo baja si el
+# encabezado se BORRA (perder contenido recuperable) o si el empaquetador
+# evita cerrar chunk sobre una unidad corta que no cierra oración — y eso
+# último vive en chunk.empaquetar(), no aquí.
+MAX_PALABRAS_NO_PROSA = 12
+
+# Numeración de sección al inicio: "1.1 Publications", "2 Antecedentes",
+# "3.4.1 Método". Exige texto detrás: "2010" solo es un dato, no un título.
+_RE_SECCION_NUMERADA = re.compile(r"^\d+(?:\.\d+)*[\.\)]?\s+\S")
+
+# Etiqueta de dato de gráfica: empieza por número/porcentaje y una coma.
+# "0.05, Clinical trial", "1.46%, Other", "12,052, Other".
+_RE_ETIQUETA_DATO = re.compile(r"^[\d.,%$€]+\s*,\s*\S")
+
+# Terminadores de oración a efectos de "esta línea cerró". Mismo criterio que
+# scripts/medir_terminadores.py, para que lo que se arregla y lo que se mide
+# no puedan divergir.
+_TERMINADORES_LINEA = tuple(".!?;:\"')]}»…”’")
+
+
+def _es_titulo(linea: str) -> bool:
+    """
+    Formato título: mayoría de palabras alfabéticas con inicial mayúscula.
+
+    Deja fuera los line-wraps de prosa, que es lo importante: "Between 2010 and
+    2022, the total number of AI" tiene una sola inicial mayúscula de seis
+    palabras y no pasa. "Chapter Highlights" o "Foundation Models", sí.
+    """
+    palabras = [p for p in linea.split() if p[:1].isalpha()]
+    if len(palabras) < 2:
+        return False
+    mayusculas = sum(1 for p in palabras if p[:1].isupper())
+    return mayusculas / len(palabras) >= 0.6
+
+
+def _es_linea_no_prosa(linea: str) -> bool:
+    """Forma de encabezado de sección o de etiqueta de gráfica."""
+    linea = linea.strip()
+    if not linea or len(linea.split()) > MAX_PALABRAS_NO_PROSA:
+        return False
+    if linea.endswith(_TERMINADORES_LINEA):
+        # Ya cierra: no se pega a lo que sigue, no hay nada que separar.
+        return False
+    return bool(
+        _RE_SECCION_NUMERADA.match(linea)
+        or _RE_ETIQUETA_DATO.match(linea)
+        or _es_titulo(linea)
+        or (linea.isupper() and any(c.isalpha() for c in linea))
+    )
+
+
+def aislar_lineas_no_prosa(paginas: list[str]) -> tuple[list[str], dict]:
+    """
+    Rodea de líneas en blanco las líneas que no son prosa, sin borrar ninguna.
+
+    Solo actúa cuando el contexto confirma que separar no rompe nada:
+      * la línea anterior cerró oración (o la línea abre la página), y
+      * la siguiente no empieza en minúscula, que sería continuación de esta.
+
+    Returns:
+        (paginas, diagnostico) con cuántas líneas se aislaron y una muestra,
+        para que ingest_data.py lo registre: una separación silenciosa es tan
+        difícil de auditar como un borrado silencioso.
+    """
+    salida, aisladas, muestra = [], 0, []
+
+    for pagina in paginas:
+        lineas = [l.strip() for l in pagina.splitlines() if l.strip()]
+        if not lineas:
+            salida.append("")
+            continue
+
+        piezas = []
+        for i, linea in enumerate(lineas):
+            previa = lineas[i - 1] if i else None
+            siguiente = lineas[i + 1] if i + 1 < len(lineas) else None
+
+            cierra_previa = previa is None or previa.endswith(_TERMINADORES_LINEA)
+            # Si la siguiente arranca en minúscula, esta línea es el principio
+            # de una oración partida por el ancho de página, no un encabezado.
+            continua_siguiente = bool(siguiente) and siguiente[:1].islower()
+
+            if cierra_previa and not continua_siguiente and _es_linea_no_prosa(linea):
+                aisladas += 1
+                if len(muestra) < 10:
+                    muestra.append(linea)
+                piezas.append("\n" + linea + "\n")   # el "\n\n" lo da el join
+            else:
+                piezas.append(linea)
+
+        salida.append("\n".join(piezas))
+
+    return salida, {"lineas_aisladas": aisladas, "muestra_aisladas": muestra}
+
+
+# --- Oraciones que cruzan de página -----------------------------------------
+#
+# APAGADO POR DEFECTO, igual que el bloque anterior y por el mismo motivo:
+# sobre la muestra dispara solo 25 veces en ~800 páginas y no mueve la métrica
+# (433 -> 433 corte_real). La hipótesis era razonable y resultó marginal: casi
+# ninguna página termina a media oración con la siguiente empezando en
+# minúscula, porque entre las dos mitades suele quedar el encabezado de la
+# página siguiente.
+#
+# Medido sobre la muestra: la mayoría de los chunks que cortan a media frase no
+# cortan en un encabezado, cortan en el SALTO DE PÁGINA. Las páginas se unían
+# siempre con "\n\n", chunk.py parte párrafo justo ahí (`re.split(r"\n\s*\n")`)
+# y una oración que sigue en la página siguiente queda partida en dos unidades.
+# El chunker no puede recomponerla: nunca junta lo que recibe separado.
+#
+# La regla es la misma que chunk._unir_line_wraps() aplica DENTRO del párrafo,
+# subida un nivel: se une solo si la página anterior no cerró oración y la
+# siguiente arranca en minúscula. Si arranca en mayúscula o dígito es un
+# título, una nueva oración o un ítem de índice, y el salto se respeta.
+def unir_paginas(paginas: list[str]) -> tuple[str, dict]:
+    """Une las páginas, sin separación de párrafo cuando la oración continúa."""
+    partes, unidas = [], 0
+
+    for pagina in paginas:
+        if not pagina.strip():
+            continue
+        if not partes:
+            partes.append(pagina)
+            continue
+
+        anterior = partes[-1].rstrip()
+        primera = pagina.lstrip()[:1]
+        continua = (anterior
+                    and not anterior.endswith(_TERMINADORES_LINEA)
+                    and primera.islower())
+        if continua:
+            unidas += 1
+            partes[-1] = partes[-1].rstrip() + "\n" + pagina.lstrip()
+        else:
+            partes.append(pagina)
+
+    return "\n\n".join(partes), {"paginas_unidas": unidas}
+
+
+# --- Puntuación desplazada en líneas árabes (RTL) ---------------------------
+#
+# APAGADO POR DEFECTO (`_aplicar_limpieza(rtl=False)`), a la espera de medición.
+#
+# QUÉ PASA DE VERDAD, que no es lo que parecía.
+# El diagnóstico inicial decía que PyMuPDF emite los runs árabes "en orden
+# visual invertido". Comprobado punto de código a punto de código, es más
+# estrecho: las LETRAS y el ORDEN DE PALABRAS son correctos. Lo único que se
+# desplaza es la puntuación de cierre de la línea.
+#
+# En una línea RTL el punto final se dibuja en el extremo IZQUIERDO. PyMuPDF
+# recorre la página de izquierda a derecha, así que lo emite primero y queda
+# pegado al inicio:
+#
+#     emitido : ".جميع الحقوق محفوظة"      <- el punto abre la línea
+#     correcto: "جميع الحقوق محفوظة."      <- el punto cierra la línea
+#                (= "todos los derechos reservados.")
+#
+# Consecuencia: la línea nunca termina en terminador, así que todo chunk que
+# cierre ahí cuenta como `corte_real`.
+#
+# AVISO PARA QUIEN VERIFIQUE ESTO A MANO: la terminal aplica bidi al pintar
+# árabe, de modo que un texto lógicamente invertido SE VE correcto y viceversa.
+# Cualquier comprobación visual en consola miente. Verificar con
+# unicodedata.name() sobre los puntos de código, nunca a ojo.
+_RE_ARABE = re.compile(r"[؀-ۿݐ-ݿﭐ-﷿ﹰ-﻿]")
+
+# Solo puntuación que CIERRA ORACIÓN. Medido: incluir coma (،), punto y coma
+# (؛) y dos puntos empeoraba las cosas. En F2-UNOOSA-025, 100 de 135 movimientos
+# eran `؛`: mover ese signo no cierra ninguna oración, pero sí cambia dónde
+# segmenta pysbd y baraja las fronteras de chunk. El documento empeoraba 2,6pp
+# por puro churn. Un signo que no cierra oración no arregla un corte de oración.
+_PUNTUACION_CIERRE_RTL = ".!?…؟"
+
+# Mínimo de caracteres árabes para considerar que la línea es RTL. Por debajo
+# es una cita suelta dentro de un texto latino y no se toca.
+MIN_ARABE_LINEA = 8
+
+# Fracción mínima de letras que deben ser árabes. Evita actuar sobre líneas
+# mixtas donde el latín manda y la dirección del párrafo es LTR.
+MIN_FRACCION_ARABE = 0.5
+
+
+def _es_linea_rtl(linea: str) -> bool:
+    """La línea es predominantemente árabe, no una cita suelta."""
+    arabes = len(_RE_ARABE.findall(linea))
+    if arabes < MIN_ARABE_LINEA:
+        return False
+    letras = sum(1 for c in linea if c.isalpha())
+    return letras > 0 and arabes / letras >= MIN_FRACCION_ARABE
+
+
+def corregir_puntuacion_rtl(texto: str) -> tuple[str, dict]:
+    """
+    Devuelve al final la puntuación que quedó al inicio de las líneas árabes.
+
+    Conservador a propósito: solo actúa si la línea es mayoritariamente árabe,
+    empieza por puntuación de cierre y NO termina ya en una. Si termina en
+    puntuación, la del inicio pertenece a otra cosa y moverla inventaría texto.
+    """
+    lineas = texto.split("\n")
+    salida, movidas = [], 0
+
+    for linea in lineas:
+        despojada = linea.strip()
+        if (not despojada
+                or despojada[0] not in _PUNTUACION_CIERRE_RTL
+                or despojada[-1] in _PUNTUACION_CIERRE_RTL
+                or not _es_linea_rtl(despojada)):
+            salida.append(linea)
+            continue
+
+        corte = 0
+        while corte < len(despojada) and despojada[corte] in _PUNTUACION_CIERRE_RTL:
+            corte += 1
+        prefijo, resto = despojada[:corte], despojada[corte:].lstrip()
+        if not resto:
+            salida.append(linea)
+            continue
+
+        salida.append(resto + prefijo)
+        movidas += 1
+
+    return "\n".join(salida), {"rtl_puntuacion_movida": movidas}
+
+
+# --- cmap roto: texto desplazado en el punto de codigo ----------------------
+#
+# APAGADO POR DEFECTO (`_aplicar_limpieza(cmap=False)`).
+#
+# CORRIJO MI PROPIO DIAGNOSTICO ANTERIOR. El informe decia que en F3-CEOBS-030
+# "las fronteras de palabra se perdieron en la extraccion" y que por eso solo
+# quedaba vaciar el documento. Es falso para el grueso del texto: el CUERPO
+# conserva los espacios y se descifra limpio. Lo que se pierde son los espacios
+# de los titulares y del indice, que ya venian pegados en el PDF.
+#
+# Tampoco es un Cesar sobre a-z, como escribi: es un desplazamiento uniforme
+# del PUNTO DE CODIGO, que cruza la frontera entre letras, digitos y simbolos.
+#
+#     "8LI 1MREQEXE" +28 -> "The Minamata"      T=84, 8=56  -> 28 exactos
+#     "/LVWRI"       +29 -> "Listof"            L=76, /=47  -> 29 exactos
+#
+# Son subconjuntos de fuente distintos, cada uno con su cmap roto a su manera,
+# no un cifrado unico.
+OFFSETS_CMAP = (28, 29, -1)
+
+# Fraccion de vocales del ingles sano. Medida sobre 994 documentos en ingles del
+# corpus: p05=0,376  mediana=0,391  p95=0,406. Se usa como juez porque NO
+# depende de los espacios: funciona igual en "Listof" que en "List of". El juez
+# de palabras funcionales que probe primero daba cero en el texto pegado y
+# empataba con "no tocar", asi que ganaba no tocar.
+VOCALES_INGLES = 0.39
+TOLERANCIA_VOCALES = 0.09
+
+# Minimo de letras latinas por linea. Por debajo, la fraccion de vocales es
+# ruido estadistico y un acierto por azar reescribiria texto sano.
+MIN_LETRAS_CMAP = 12
+
+# Puerta a nivel de DOCUMENTO. El descifrado solo se intenta si el documento
+# entero puntua como corrupto. Sin esta puerta, la funcion podria reescribir
+# texto legitimo en algun documento con mucha tabla o sigla.
+#
+# El umbral cae en mitad de un hueco enorme. Medido sobre los 1.721 documentos
+# del corpus con >=500 letras latinas:
+#
+#     F3-CEOBS-030   0,1970   <- el unico corrupto
+#     F2-SWF-130     0,3159   <- el siguiente mas bajo
+#
+# Con 0,25 la puerta selecciona 1 documento de 1.721 y sobra margen por los dos
+# lados. Ojo: un umbral calibrado con datos de PARRAFO no vale aqui — los
+# parrafos sanos bajan mucho mas que los documentos enteros, y con 0,15 (la
+# cifra por parrafo) la puerta no disparaba ni en CEOBS-030.
+MAX_VOCALES_DOC_CORRUPTO = 0.25
+
+_VOCALES = frozenset("aeiouAEIOU")
+
+
+def _fraccion_vocales(texto: str) -> float | None:
+    """Vocales sobre letras latinas. None si no hay letras latinas que medir."""
+    letras = [c for c in texto if "a" <= c.lower() <= "z"]
+    if not letras:
+        return None
+    return sum(1 for c in letras if c in _VOCALES) / len(letras)
+
+
+def _desplazar_codigo(texto: str, k: int) -> str:
+    """Desplaza el punto de codigo de los ASCII imprimibles, nada mas."""
+    return "".join(
+        chr(ord(c) + k) if 32 < ord(c) < 127 else c
+        for c in texto
+    )
+
+
+def corregir_cmap_desplazado(texto: str) -> tuple[str, dict]:
+    """
+    Deshace el desplazamiento de punto de codigo de un PDF con el cmap roto.
+
+    Conservador en tres niveles: el documento entero tiene que puntuar como
+    corrupto, la linea tiene que tener letras suficientes, y el descifrado tiene
+    que caer dentro de la tolerancia del ingles sano. Si algo no cuadra, la
+    linea se devuelve intacta: es preferible dejar ruido que reescribir texto
+    bueno.
+    """
+    global_voc = _fraccion_vocales(texto)
+    if global_voc is None or global_voc >= MAX_VOCALES_DOC_CORRUPTO:
+        return texto, {}
+
+    salida, arregladas = [], 0
+    por_offset: dict[int, int] = {}
+
+    for linea in texto.split("\n"):
+        voc = _fraccion_vocales(linea)
+        letras = sum(1 for c in linea if "a" <= c.lower() <= "z")
+        if (voc is None
+                or letras < MIN_LETRAS_CMAP
+                or abs(voc - VOCALES_INGLES) <= TOLERANCIA_VOCALES):
+            salida.append(linea)          # vacia, corta, o ya parece sana
+            continue
+
+        mejor_k, mejor_dist = None, None
+        for k in OFFSETS_CMAP:            # orden fijo: desempate determinista
+            cand = _fraccion_vocales(_desplazar_codigo(linea, k))
+            if cand is None:
+                continue
+            dist = abs(cand - VOCALES_INGLES)
+            if mejor_dist is None or dist < mejor_dist:
+                mejor_k, mejor_dist = k, dist
+
+        if mejor_k is None or mejor_dist > TOLERANCIA_VOCALES:
+            salida.append(linea)
+            continue
+
+        salida.append(_desplazar_codigo(linea, mejor_k))
+        arregladas += 1
+        por_offset[mejor_k] = por_offset.get(mejor_k, 0) + 1
+
+    if not arregladas:
+        return texto, {}
+
+    return "\n".join(salida), {
+        "cmap_lineas_corregidas": arregladas,
+        "cmap_offsets": {str(k): por_offset[k] for k in sorted(por_offset)},
+    }
+
+
+def vaciar_cmap_roto(texto: str) -> tuple[str, dict]:
+    """
+    Opcion (b): descartar el texto ilegible en vez de descifrarlo.
+
+    Se conserva por si el descifrado no pasa el gate. Vacia las lineas que
+    puntuan como corruptas y no toca las demas. No inventa contenido: solo
+    borra lo que ya era ruido para el indice vectorial.
+    """
+    global_voc = _fraccion_vocales(texto)
+    if global_voc is None or global_voc >= MAX_VOCALES_DOC_CORRUPTO:
+        return texto, {}
+
+    salida, vaciadas = [], 0
+    for linea in texto.split("\n"):
+        voc = _fraccion_vocales(linea)
+        letras = sum(1 for c in linea if "a" <= c.lower() <= "z")
+        if (voc is not None
+                and letras >= MIN_LETRAS_CMAP
+                and abs(voc - VOCALES_INGLES) > TOLERANCIA_VOCALES):
+            vaciadas += 1
+            continue
+        salida.append(linea)
+
+    if not vaciadas:
+        return texto, {}
+    return "\n".join(salida), {"cmap_lineas_vaciadas": vaciadas}
+
+
+# Fixes de limpieza APROBADOS para la corrida de produccion, en un solo sitio
+# para que las tres llamadas de extraer_pdf no se desincronicen. Los parametros
+# de `_aplicar_limpieza` siguen apagados por defecto a proposito: asi los A/B de
+# scripts/ miden contra la base real y no contra la configuracion aprobada.
+#
+#   rtl   — puntuacion RTL desplazada. Medido: -8 corte_real en la muestra,
+#           3 documentos afectados, 17 controles a +0,0pp.
+#   cmap  — cmap roto de F3-CEOBS-030. Medido: legibilidad 0,505 -> 0,960,
+#           87,6% de los caracteres recuperados, 1 documento de 1.721.
+#
+# `aislar` y `unir` NO entran: medidos y no pagan.
+LIMPIEZA_APROBADA = {"rtl": True, "cmap": "descifrar"}
+
+
+def _aplicar_limpieza(paginas: list[str], aislar: bool = False,
+                      unir: bool = False, rtl: bool = False,
+                      cmap: str | None = None) -> tuple[str, dict]:
     """
     Limpia el boilerplate y aplica la salvaguarda del 40%.
 
     Devuelve (texto, extra_parcial). Si la limpieza se pasa de la raya, se
     devuelve el texto ORIGINAL y el diagnóstico dice por qué, para que el
     documento se revise a mano en vez de quedarse vaciado.
+
+    `aislar` y `unir` existen para el A/B de scripts/ab_extraccion.py: permiten
+    medir cada fix por separado sin tocar el módulo.
     """
     original = "\n\n".join(paginas)
     limpias, diag = limpiar_boilerplate_paginas(paginas)
-    limpio = "\n\n".join(p for p in limpias if p.strip())
+    if aislar:
+        limpias, diag_aislado = aislar_lineas_no_prosa(limpias)
+        diag.update(diag_aislado)
+    if unir:
+        limpio, diag_unido = unir_paginas(limpias)
+        diag.update(diag_unido)
+    else:
+        limpio = "\n\n".join(p for p in limpias if p.strip())
+
+    # Va al final, sobre el texto ya montado: opera línea a línea y no depende
+    # de la separación por páginas.
+    if rtl:
+        limpio, diag_rtl = corregir_puntuacion_rtl(limpio)
+        diag.update(diag_rtl)
+
+    # `cmap` es "descifrar" (a) o "vaciar" (b); None deja el texto como esta.
+    if cmap == "descifrar":
+        limpio, diag_cmap = corregir_cmap_desplazado(limpio)
+        diag.update(diag_cmap)
+    elif cmap == "vaciar":
+        limpio, diag_cmap = vaciar_cmap_roto(limpio)
+        diag.update(diag_cmap)
+    elif cmap is not None:
+        raise ValueError(f"cmap debe ser 'descifrar', 'vaciar' o None: {cmap!r}")
 
     palabras_antes = len(original.split())
     palabras_despues = len(limpio.split())
@@ -717,6 +1175,17 @@ def _aplicar_limpieza(paginas: list[str]) -> tuple[str, dict]:
         "limpieza_lineas": diag.get("lineas_eliminadas", 0),
         "limpieza_fraccion_palabras": round(fraccion, 4),
     }
+    if diag.get("lineas_aisladas"):
+        extra["limpieza_aisladas"] = diag["lineas_aisladas"]
+    if diag.get("paginas_unidas"):
+        extra["limpieza_paginas_unidas"] = diag["paginas_unidas"]
+    if diag.get("rtl_puntuacion_movida"):
+        extra["rtl_puntuacion_movida"] = diag["rtl_puntuacion_movida"]
+    if diag.get("cmap_lineas_corregidas"):
+        extra["cmap_lineas_corregidas"] = diag["cmap_lineas_corregidas"]
+        extra["cmap_offsets"] = diag["cmap_offsets"]
+    if diag.get("cmap_lineas_vaciadas"):
+        extra["cmap_lineas_vaciadas"] = diag["cmap_lineas_vaciadas"]
     if diag.get("n_patrones"):
         extra["limpieza_patrones"] = diag["patrones_detectados"]
 
@@ -818,7 +1287,7 @@ def extraer_pdf(ruta: Path, usar_ocr: bool = True) -> tuple[str, str | None, dic
             n_paginas = doc.page_count
         finally:
             doc.close()
-        texto, extra_limpieza = _aplicar_limpieza(partes)
+        texto, extra_limpieza = _aplicar_limpieza(partes, **LIMPIEZA_APROBADA)
         extra = {"motor_pdf": "pymupdf", "paginas": n_paginas, **extra_limpieza}
 
         # ¿Trae capa de texto? Si no, está escaneado y hay que rasterizar.
@@ -827,7 +1296,8 @@ def extraer_pdf(ruta: Path, usar_ocr: bool = True) -> tuple[str, str | None, dic
         ):
             caracteres_previos = len(texto)
             paginas_ocr = _ocr_pdf(ruta)
-            texto_ocr, extra_limpieza_ocr = _aplicar_limpieza(paginas_ocr)
+            texto_ocr, extra_limpieza_ocr = _aplicar_limpieza(
+                paginas_ocr, **LIMPIEZA_APROBADA)
             # Solo se acepta el OCR si aporta más de lo que ya había: si
             # Tesseract devuelve menos, el original imperfecto es mejor que
             # una página en blanco.
@@ -864,7 +1334,7 @@ def extraer_pdf(ruta: Path, usar_ocr: bool = True) -> tuple[str, str | None, dic
                 paginas_fallidas += 1
             if t:
                 partes.append(t)
-        texto, extra_limpieza = _aplicar_limpieza(partes)
+        texto, extra_limpieza = _aplicar_limpieza(partes, **LIMPIEZA_APROBADA)
         extra = {
             "motor_pdf": "pypdf2",
             "paginas": len(reader.pages),

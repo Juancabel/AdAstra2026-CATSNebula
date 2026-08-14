@@ -11,6 +11,9 @@
 /data/chunks.jsonl
 /data/fallos_ingesta_data.jsonl
 /data/reporte_idioma.json
+# Paginas crudas cacheadas por scripts/ab_extraccion.py. Dato derivado del
+# corpus, solo para que el A/B de un fix no vuelva a abrir los PDF cada vez.
+/data/cache_paginas_muestra.json
 # Indice vectorial. index.faiss son ~336 MB (86.046 x 1024 x 4 B) y
 # metadata.jsonl ~240 MB: los dos por encima del limite de 100 MB por archivo
 # de GitHub. Se regeneran con:
