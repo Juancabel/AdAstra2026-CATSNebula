@@ -1,0 +1,4 @@
+{"subject": "Estados Unidos", "relation": "desarrolla", "object": "sistemas autónomos", "doc_ids": "F1-AIINDEX-001", "chunk_ids": "F1-AIINDEX-001_c000", "evidence": "Estados Unidos desarrolla sistemas autónomos para defensa."}
+{"subject": "Colombia", "relation": "regula", "object": "uso", "doc_ids": "F1-AIINDEX-001", "chunk_ids": "F1-AIINDEX-001_c000", "evidence": "Colombia regula el uso de estos sistemas."}
+{"subject": "Colombia", "relation": "afecta", "object": "gobernanza territorial", "doc_ids": "F3-COL-010", "chunk_ids": "F3-COL-010_c000", "evidence": "Colombia afecta la gobernanza territorial y la seguridad regional mediante decisiones de política pública."}
+{"subject": "La Fuerza Aérea", "relation": "coordina", "object": "con la ONU", "doc_ids": "F2-ESA-005", "chunk_ids": "F2-ESA-005_c000", "evidence": "La Fuerza Aérea coordina con la ONU para mitigar riesgos espaciales y la basura orbital."}

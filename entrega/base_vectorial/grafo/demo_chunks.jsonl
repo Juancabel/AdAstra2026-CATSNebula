@@ -1,0 +1,3 @@
+{"doc_id": "F1-AIINDEX-001", "chunk_id": "F1-AIINDEX-001_c000", "fuente": "F1_IA/ai_index/intro.json", "fenomeno": 1, "texto": "Estados Unidos desarrolla sistemas autónomos para defensa. Colombia regula el uso de estos sistemas."}
+{"doc_id": "F2-ESA-005", "chunk_id": "F2-ESA-005_c000", "fuente": "F2_Seguridad_Entorno_Espacial/ESA_Space_Debris/reportes.json", "fenomeno": 2, "texto": "La Fuerza Aérea coordina con la ONU para mitigar riesgos espaciales y la basura orbital."}
+{"doc_id": "F3-COL-010", "chunk_id": "F3-COL-010_c000", "fuente": "F3_Territorio_Colombia/observatorio.json", "fenomeno": 3, "texto": "Colombia afecta la gobernanza territorial y la seguridad regional mediante decisiones de política pública."}

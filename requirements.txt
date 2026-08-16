@@ -74,5 +74,8 @@ tokenizers==0.22.2
 # introducirían no-determinismo por orden de inserción y clustering.
 faiss-cpu==1.15.0
 
+# --- Grafo de conocimiento (bonus) ----------------------------------------
+networkx==3.4.2
+
 # --- Pruebas ---------------------------------------------------------------
 pytest==9.1.1

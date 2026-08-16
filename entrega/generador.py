@@ -34,6 +34,10 @@ import re
 import sys
 from pathlib import Path
 
+import networkx as nx
+
+from knowledge_graph import extract_entities_from_text
+
 # Sentinel de version: permite a verificar_generador.py confirmar que cargo
 # ESTE archivo y no un generador.py viejo/ajeno que lo tape en la ruta.
 GENERADOR_VERSION = "1.0-baseline"
@@ -45,6 +49,7 @@ RUTA_BASE = Path(__file__).resolve().parent  # = entrega/
 
 RUTA_INDICE   = RUTA_BASE / "base_vectorial" / "encoder_bge-m3" / "index.faiss"
 RUTA_METADATA = RUTA_BASE / "base_vectorial" / "encoder_bge-m3" / "metadata.jsonl"
+RUTA_GRAFO    = RUTA_BASE / "base_vectorial" / "grafo" / "grafo.graphml"
 RUTA_MODELO   = RUTA_BASE / "modelos" / "bge-m3"   # pesos locales shippeados
 MODELO_HF     = "BAAI/bge-m3"                       # fallback si no hay pesos locales
 REVISION_HF   = "5617a9f61b028005a4858fdac845db406aefb181"
@@ -252,7 +257,67 @@ def encodear(modelo, textos):
 # ----------------------------------------------------------------------------
 # RECUPERACION Y CONSTRUCCION DE LA RESPUESTA
 # ----------------------------------------------------------------------------
-def construir_documentos(hits, metas):
+def cargar_grafo(ruta: Path):
+    if not ruta.exists():
+        return None
+    try:
+        return nx.read_graphml(str(ruta))
+    except Exception:
+        return None
+
+
+def doc_ids_relacionados_por_consulta(query_text: str, grafo):
+    if grafo is None:
+        return set()
+    query_text = query_text or ""
+    entities = extract_entities_from_text(query_text)
+    if not entities:
+        return set()
+    matches = set()
+    lowered_entities = {e.lower() for e in entities if e and e.strip()}
+    for nodo in grafo.nodes:
+        n = str(nodo).lower()
+        if any(e in n or n in e for e in lowered_entities):
+            for _, _, data in grafo.edges(nodo, data=True):
+                for value in (data.get("doc_ids", ""), data.get("doc_id", "")):
+                    if value:
+                        matches.update(str(value).split(";"))
+            for _, _, data in grafo.in_edges(nodo, data=True):
+                for value in (data.get("doc_ids", ""), data.get("doc_id", "")):
+                    if value:
+                        matches.update(str(value).split(";"))
+    return {m for m in matches if m}
+
+
+def fusionar_resultados_vectoriales(vector_ranking, graph_candidates, k0: int = 60):
+    """Fusiona dos listas de candidatos usando RRF (Reciprocal Rank Fusion).
+
+    Esta estrategia es compatible con la Sección 8.4 del reto: combina la
+    recuperación vectorial con los candidatos del grafo sin recurrir a modelos
+    generativos, mantiene un orden determinista y es robusta frente a escalas
+    distintas de score.
+    """
+    vector_ranking = [d for d in (vector_ranking or []) if d]
+    graph_candidates = [d for d in (graph_candidates or []) if d]
+    if not vector_ranking and not graph_candidates:
+        return []
+
+    score = {}
+    for ranking_name, ranking in [("vector", vector_ranking), ("graph", graph_candidates)]:
+        for pos, doc_id in enumerate(ranking, start=1):
+            if not doc_id:
+                continue
+            score.setdefault(doc_id, 0.0)
+            score[doc_id] += 1.0 / (k0 + pos)
+
+    ranked = sorted(
+        score,
+        key=lambda doc_id: (-score[doc_id], vector_ranking.index(doc_id) if doc_id in vector_ranking else len(vector_ranking) + 1, graph_candidates.index(doc_id) if doc_id in graph_candidates else len(graph_candidates) + 1),
+    )
+    return ranked
+
+
+def construir_documentos(hits, metas, query_text: str = "", grafo=None):
     """hits: lista de (score, faiss_id) ordenada por score desc.
     Agrupa por doc_id, agrega el score, devuelve los 3 doc_id distintos top.
     Dedup natural por doc_id (el reto empareja documento por doc_id oficial)."""
@@ -270,35 +335,105 @@ def construir_documentos(hits, metas):
             return sum(vs) / len(vs)
         raise ValueError(f"AGREGACION invalida: {AGREGACION}")
 
-    # Orden determinista: score agregado desc, y doc_id asc como desempate.
-    ranking = sorted(scores.items(), key=lambda kv: (-agrega(kv[1]), kv[0]))
-    top = ranking[:N_DOCS]
-    return [{"rank": i + 1, "doc_id": doc_id} for i, (doc_id, _) in enumerate(top)]
+    vector_ranking = [doc_id for doc_id, _ in sorted(scores.items(), key=lambda kv: (-agrega(kv[1]), kv[0]))]
+    graph_boost = list(doc_ids_relacionados_por_consulta(query_text, grafo))
+    fused = fusionar_resultados_vectoriales(vector_ranking, graph_boost)
+    top = fused[:N_DOCS]
+    return [{"rank": i + 1, "doc_id": doc_id} for i, doc_id in enumerate(top)]
 
 
-def construir_fragmentos(hits, metas):
+def grafo_evidencia_para_doc(grafo, doc_id: str, query_text: str = "") -> str:
+    if grafo is None:
+        return ""
+    query_text = (query_text or "").lower()
+    snippets = []
+    for u, v, data in grafo.edges(data=True):
+        doc_ids = str(data.get("doc_ids", "")).split(";")
+        if doc_id not in doc_ids:
+            continue
+        relation = data.get("relation", "")
+        evidence = data.get("evidence", "")
+        if not evidence:
+            continue
+        snippets.append(f"{u} {relation} {v}. Evidencia del grafo: {evidence[:180]}")
+    if not snippets:
+        return ""
+    extra = " | ".join(snippets[:3])
+    if query_text and query_text not in extra.lower():
+        return extra
+    return extra
+
+
+def generar_evidencia_consulta(qid: str, query_text: str, documents: list[dict], fragments: list[dict], grafo):
+    """Devuelve un artefacto paralelo con la evidencia semántica del grafo por documento."""
+    graph_evidence = []
+    if grafo is not None:
+        for doc in documents:
+            doc_id = doc.get("doc_id")
+            evidence_for_doc = []
+            for u, v, data in grafo.edges(data=True):
+                doc_ids = {d.strip() for d in str(data.get("doc_ids", "")).split(";") if d.strip()}
+                if doc_id not in doc_ids:
+                    continue
+                evidence_for_doc.append({
+                    "subject": u,
+                    "relation": data.get("relation", ""),
+                    "object": v,
+                    "evidence": data.get("evidence", ""),
+                })
+            graph_evidence.append({
+                "rank": doc.get("rank"),
+                "doc_id": doc_id,
+                "graph_evidence": evidence_for_doc[:3],
+            })
+
+    return {
+        "query_id": qid,
+        "query_text": query_text,
+        "documents": documents,
+        "fragments": fragments,
+        "graph_evidence": graph_evidence,
+    }
+
+
+def construir_fragmentos(hits, metas, query_text: str = "", grafo=None):
     """Toma los mejores hits, uno por chunk, y arma exactamente N_FRAGS
     fragmentos <= 250 palabras. Chunk grande -> se subdivide y se toma la primera
-    pieza (baseline; conserva el chunk_id original)."""
+    pieza (baseline; conserva el chunk_id original). Si existe evidencia del grafo,
+    se anexa explícitamente al final del texto de salida para trazabilidad, pero
+    truncando para respetar el tope duro del reto."""
     fragmentos = []
     for score, fid in hits:
         meta = metas[fid]
         texto = meta[CAMPO_TEXTO]
         if not texto or not texto.strip():
-            continue  # los ~6 docs sin texto no aportan fragmento util
+            continue
         piezas = subdividir(texto, MAX_PALABRAS)
+        base = piezas[0]
+        evidencia = grafo_evidencia_para_doc(grafo, meta["doc_id"], query_text=query_text)
+        text_final = base.strip()
+        if evidencia:
+            prefix = "Evidencia del grafo: "
+            words_base = text_final.split()
+            remaining = max(0, MAX_PALABRAS - len(words_base))
+            if remaining:
+                extra_words = evidencia.split()
+                extra = " ".join(extra_words[:remaining])
+                text_final = f"{text_final} {prefix}{extra}".strip()
+            else:
+                text_final = " ".join(words_base[:MAX_PALABRAS])
         fragmentos.append({
             "rank": len(fragmentos) + 1,
             "chunk_id": meta["chunk_id"],
             "doc_id": meta["doc_id"],
-            "text": piezas[0],   # baseline: primera pieza <=250
+            "text": text_final,
         })
         if len(fragmentos) == N_FRAGS:
             break
     return fragmentos
 
 
-def procesar_consulta(qid, qvec, index, metas):
+def procesar_consulta(qid, qvec, index, metas, query_text: str = "", grafo=None):
     import numpy as np
     D, I = index.search(np.asarray([qvec], dtype="float32"), TOP_K)
     # Empareja score con id, descarta -1 (relleno de FAISS cuando faltan vecinos).
@@ -306,9 +441,10 @@ def procesar_consulta(qid, qvec, index, metas):
     # Orden determinista: score desc, id asc como desempate.
     hits.sort(key=lambda h: (-h[0], h[1]))
 
-    documents = construir_documentos(hits, metas)
-    fragments = construir_fragmentos(hits, metas)
-    return {"query_id": qid, "documents": documents, "fragments": fragments}
+    documents = construir_documentos(hits, metas, query_text=query_text, grafo=grafo)
+    fragments = construir_fragmentos(hits, metas, query_text=query_text, grafo=grafo)
+    evidence = generar_evidencia_consulta(qid, query_text, documents, fragments, grafo)
+    return {"query_id": qid, "documents": documents, "fragments": fragments}, evidence
 
 
 # ----------------------------------------------------------------------------
@@ -359,16 +495,21 @@ def main():
         raise AssertionError(
             f"Desalineamiento: index.ntotal={index.ntotal} != metadata={len(metas)}")
 
-    print("[3/5] Cargando encoder y consultas...", file=sys.stderr)
+    print("[3/5] Cargando encoder, grafo y consultas...", file=sys.stderr)
     consultas = cargar_consultas(args.consultas)
     if len(consultas) != 50:
         raise AssertionError(f"Se esperaban 50 consultas, hay {len(consultas)}")
+    grafo = cargar_grafo(RUTA_GRAFO)
     modelo = cargar_encoder(args.dispositivo)
     qvecs = encodear(modelo, [txt for _, txt in consultas])
 
     print("[4/5] Recuperando...", file=sys.stderr)
-    lineas = [procesar_consulta(qid, qvecs[i], index, metas)
-              for i, (qid, _) in enumerate(consultas)]
+    lineas = []
+    evidencias = []
+    for i, (qid, txt) in enumerate(consultas):
+        obj, evid = procesar_consulta(qid, qvecs[i], index, metas, query_text=txt, grafo=grafo)
+        lineas.append(obj)
+        evidencias.append(evid)
 
     print("[5/5] Validando y escribiendo...", file=sys.stderr)
     validar_salida(lineas)
@@ -376,7 +517,14 @@ def main():
         for obj in lineas:
             f.write(json.dumps(obj, ensure_ascii=False) + "\n")
 
+    sidecar = args.salida.parent / "grafo" / "evidencia_consultas.jsonl"
+    sidecar.parent.mkdir(parents=True, exist_ok=True)
+    with sidecar.open("w", encoding="utf-8") as f:
+        for evid in evidencias:
+            f.write(json.dumps(evid, ensure_ascii=False) + "\n")
+
     print(f"OK -> {args.salida}  ({len(lineas)} lineas)", file=sys.stderr)
+    print(f"EVIDENCIA -> {sidecar}", file=sys.stderr)
 
 
 if __name__ == "__main__":

@@ -87,10 +87,42 @@ tokenizador real de BGE-M3 (el de `chunks.jsonl` es palabras × 1.9, y queda
 guardado como `num_tokens_estimado`) y `catalogo_masivo`, la bandera de los
 8.750 chunks de catálogo que necesitan `subdividir_para_salida()` al responder.
 
+## Grafo de Conocimiento y Recuperación Reforzada
+
+Se implementó una **capa complementaria de grafo de conocimiento** que mejora la recuperación y proporciona evidencia explícita de los resultados. El grafo NO reemplaza el índice vectorial FAISS sino que lo refuerza mediante:
+
+- **Extracción de entidades**: Detección de países, organizaciones, tecnologías y eventos.
+- **Extracción de relaciones**: Identificación de vínculos semánticos (ej: "desarrolla", "regula", "coordina").
+- **Reforzamiento de ranking**: Fusión RRF entre candidatos FAISS y candidatos del grafo.
+- **Evidencia semántica**: Trazabilidad explícita de por qué un documento es relevante.
+
+**Ficheros principales**:
+- [knowledge_graph.py](knowledge_graph.py) — módulo núcleo (extracción, construcción, persistencia).
+- [build_knowledge_graph.py](build_knowledge_graph.py) — script de construcción del grafo.
+- [entrega/generador.py](entrega/generador.py) — integración con ranking vectorial y generación de salida final.
+- [scripts/corrida_grafo.py](scripts/corrida_grafo.py) — pipeline orquestado unificado.
+
+**Documentación completa**: Consulta [KNOWLEDGE_GRAPH_IMPLEMENTATION.md](KNOWLEDGE_GRAPH_IMPLEMENTATION.md) para especificación detallada de algoritmos, decisiones de diseño, limitaciones y guía de uso.
+
+**Uso rápido**:
+```bash
+# Construir grafo desde chunks reales o demo
+python scripts/corrida_grafo.py [--chunks data/chunks.jsonl] [--sin-generador]
+
+# Generar resultados con evidencia del grafo integrada
+python entrega/generador.py
+```
+
+**Salidas**:
+- `entrega/base_vectorial/grafo/grafo.graphml` — Grafo orientado en formato GraphML.
+- `entrega/base_vectorial/grafo/tripletas.jsonl` — Tripletas para auditoría.
+- `entrega/base_vectorial/grafo/evidencia_consultas.jsonl` — Sidecar con trazabilidad por query.
+- `entrega/resultados.jsonl` — Resultados finales (esquema reto) con evidencia incrustada.
+
 ## Comprobaciones
 
 ```bash
-python -m pytest tests/ -q            # 57 pruebas
+python -m pytest tests/ -q            # 89 pruebas (incluye grafo)
 python validate_jsonl.py data/documents.jsonl        # integridad del JSONL
 python verificar_registros.py data/documents.jsonl   # atomicidad de csv/xlsx/pbf
 ```

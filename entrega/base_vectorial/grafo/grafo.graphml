@@ -1,0 +1,67 @@
+<?xml version='1.0' encoding='utf-8'?>
+<graphml xmlns="http://graphml.graphdrawing.org/xmlns" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://graphml.graphdrawing.org/xmlns http://graphml.graphdrawing.org/xmlns/1.0/graphml.xsd"><key id="d7" for="edge" attr.name="chunk_ids" attr.type="string"/>
+<key id="d6" for="edge" attr.name="doc_ids" attr.type="string"/>
+<key id="d5" for="edge" attr.name="chunk_id" attr.type="string"/>
+<key id="d4" for="edge" attr.name="doc_id" attr.type="string"/>
+<key id="d3" for="edge" attr.name="evidence" attr.type="string"/>
+<key id="d2" for="edge" attr.name="relations" attr.type="string"/>
+<key id="d1" for="edge" attr.name="relation" attr.type="string"/>
+<key id="d0" for="node" attr.name="type" attr.type="string"/>
+<graph edgedefault="directed"><node id="Estados Unidos">
+  <data key="d0">entity</data>
+</node>
+<node id="sistemas autónomos">
+  <data key="d0">entity</data>
+</node>
+<node id="Colombia">
+  <data key="d0">entity</data>
+</node>
+<node id="uso">
+  <data key="d0">entity</data>
+</node>
+<node id="La Fuerza Aérea">
+  <data key="d0">entity</data>
+</node>
+<node id="con la ONU">
+  <data key="d0">entity</data>
+</node>
+<node id="gobernanza territorial">
+  <data key="d0">entity</data>
+</node>
+<edge source="Estados Unidos" target="sistemas autónomos">
+  <data key="d1">desarrolla</data>
+  <data key="d2">desarrolla</data>
+  <data key="d3">Estados Unidos desarrolla sistemas autónomos para defensa.</data>
+  <data key="d4">F1-AIINDEX-001</data>
+  <data key="d5">F1-AIINDEX-001_c000</data>
+  <data key="d6">F1-AIINDEX-001</data>
+  <data key="d7">F1-AIINDEX-001_c000</data>
+</edge>
+<edge source="Colombia" target="uso">
+  <data key="d1">regula</data>
+  <data key="d2">regula</data>
+  <data key="d3">Colombia regula el uso de estos sistemas.</data>
+  <data key="d4">F1-AIINDEX-001</data>
+  <data key="d5">F1-AIINDEX-001_c000</data>
+  <data key="d6">F1-AIINDEX-001</data>
+  <data key="d7">F1-AIINDEX-001_c000</data>
+</edge>
+<edge source="Colombia" target="gobernanza territorial">
+  <data key="d1">afecta</data>
+  <data key="d2">afecta</data>
+  <data key="d3">Colombia afecta la gobernanza territorial y la seguridad regional mediante decisiones de política pública.</data>
+  <data key="d4">F3-COL-010</data>
+  <data key="d5">F3-COL-010_c000</data>
+  <data key="d6">F3-COL-010</data>
+  <data key="d7">F3-COL-010_c000</data>
+</edge>
+<edge source="La Fuerza Aérea" target="con la ONU">
+  <data key="d1">coordina</data>
+  <data key="d2">coordina</data>
+  <data key="d3">La Fuerza Aérea coordina con la ONU para mitigar riesgos espaciales y la basura orbital.</data>
+  <data key="d4">F2-ESA-005</data>
+  <data key="d5">F2-ESA-005_c000</data>
+  <data key="d6">F2-ESA-005</data>
+  <data key="d7">F2-ESA-005_c000</data>
+</edge>
+</graph></graphml>
